@@ -6,3 +6,5 @@
 5. Containerization strategy (e.g., Docker, Kubernetes) and orchestration plan
 6. Monitoring and logging tools (e.g., Prometheus, ELK stack)
 7. Security measures and compliance considerations (e.g., encryption, access control, GDPR)
+8. Laptops / Monitors
+9. Licenses for software and tools (e.g., IDEs, libraries)
