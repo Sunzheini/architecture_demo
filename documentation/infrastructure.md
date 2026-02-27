@@ -18,5 +18,10 @@ Free unlimited private repos with 2000 CI/CD minutes/month
 Self-hosting option available via GitHub Enterprise if needed later
 
 3. Laptops / Monitors
+
 4. Licenses for software and tools (e.g., IDEs, libraries)
+
 5. Trainings and certifications for team members (e.g., AWS certifications, Python courses)
+
+6. Work methodology and communication tools
+agile, scrum, kanban, sprints, etc.
