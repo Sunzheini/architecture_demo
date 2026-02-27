@@ -9,5 +9,8 @@
 ## Open Tasks
 - Interviews architect
 - Interviews team: 2 fullstack devs, 1 devops, 1 qa
-- 1/week meeting where (office)
-- work methodology: agile, scrum, kanban, sprints, etc.
+- 1/week meeting where (office) / contract
+- Automatic filling of data inside the db
+- Performance tests / Selenium
+- Performance tests / cProfile
+- How to test with 200 requests per second / rate limiting middleware
