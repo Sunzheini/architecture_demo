@@ -11,12 +11,12 @@ Alternative: If you prefer all-in-one, GitLab includes built-in issue tracking.
 
 2. Version control system (e.g., GitHub, GitLab)
 GitHub has:
-Multi-Factor Authentication
+Multi-Factor Authentication 
+GitHub Copilot integration provides AI-assisted coding across your 18 modules
+Larger community and more third-party integrations
+Free unlimited private repos with 2000 CI/CD minutes/month
+Self-hosting option available via GitHub Enterprise if needed later
 
-3. CI/CD pipeline setup (e.g., Jenkins, GitHub Actions)
-4. Cloud provider selection (e.g., AWS, Azure, GCP) and justification
-5. Containerization strategy (e.g., Docker, Kubernetes) and orchestration plan
-6. Monitoring and logging tools (e.g., Prometheus, ELK stack)
-7. Security measures and compliance considerations (e.g., encryption, access control, GDPR)
-8. Laptops / Monitors
-9. Licenses for software and tools (e.g., IDEs, libraries)
+3. Laptops / Monitors
+4. Licenses for software and tools (e.g., IDEs, libraries)
+5. Trainings and certifications for team members (e.g., AWS certifications, Python courses)
