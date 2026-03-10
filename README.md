@@ -5,7 +5,3 @@
 2. правен
 3. маркетинг
 4. счетоводство
-
-## Open Tasks
-- discuss candidates
-- jira
