@@ -19,3 +19,7 @@ In terminal in an existing project, run:
 /tasks
 /analyze (optional)
 /implement
+
+
+1) pc
+2) 
