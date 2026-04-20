@@ -72,14 +72,58 @@ cross-cutting logic so no service reimplements it independently.
 - Migrations managed exclusively by Django.
 
 ### 7. API Gateway & Authentication
-- **API Gateway:** Azure API Management (APIM)
-  - Single entry point for all frontend-to-backend communication.
-  - Handles JWT token validation, rate limiting, routing, and CORS.
-  - Routes requests to the appropriate FastAPI module service.
-- **Identity Provider:** Azure Entra ID (formerly Azure AD)
-  - OAuth2 / PKCE flow for frontend SPAs.
-  - Role-Based Access Control (RBAC) per module configured at the gateway level.
-  - FastAPI services trust the gateway — no auth logic in individual services.
+
+#### Where does the login form live?
+The **Shell Frontend** (`erp-shell-frontend`) owns the login UI — the login page, logout button, and session state displayed in the navigation bar. Module frontends (Legal, Marketing, Accounting) **never** implement their own login screens; they inherit the authenticated session from the Shell.
+
+#### Who manages passwords and tokens?
+**You write zero password or token management code.** That responsibility belongs entirely to **Azure Entra ID** (Microsoft's cloud identity service). It stores user accounts, hashes passwords, issues tokens, handles MFA, and manages token expiry and refresh. Your code only consumes the resulting JWT token.
+
+#### How does the login flow work? (step by step)
+
+```
+1. User visits the Shell Frontend in their browser.
+
+2. Shell detects no valid session → redirects to Azure Entra ID login page
+   (hosted by Microsoft, not by your app).
+
+3. User enters credentials on the Entra ID page.
+   Entra ID validates them and issues a JWT access token + refresh token.
+
+4. Browser is redirected back to the Shell Frontend with the JWT token.
+   The Shell stores the token in memory (not localStorage — security best practice).
+
+5. Shell Frontend loads the appropriate module frontend (Legal / Marketing / Accounting)
+   and passes the JWT token to it via Module Federation shared state.
+
+6. Module frontend makes an API call:
+     GET /api/legal/contracts
+     Authorization: Bearer <jwt-token>
+
+7. Request hits Azure Front Door → Azure API Management (APIM).
+   APIM validates the JWT signature against Entra ID's public keys.
+   If invalid → 401 Unauthorized, request never reaches your code.
+   If valid → APIM extracts user ID + roles from the token and forwards the request
+   to the correct FastAPI service with the claims in headers.
+
+8. FastAPI service receives the request. It does NOT check auth — it trusts APIM.
+   erp-core's security.py reads the forwarded headers to get user ID and roles
+   for use in business logic (e.g. "can this user edit this contract?").
+```
+
+#### Component responsibilities summary
+
+| Component | Responsibility |
+|-----------|---------------|
+| **Azure Entra ID** | Stores users, validates passwords, issues JWT tokens, manages MFA and token refresh. **You do not write any of this.** |
+| **Shell Frontend** | Shows the login button/page (redirects to Entra ID). Holds the JWT token in memory. Passes auth state to module frontends. |
+| **Module Frontends** | Attach the JWT token to every API request. Show/hide UI based on roles from the token. Never handle passwords. |
+| **Azure API Management** | Validates every incoming JWT token before the request reaches any backend service. Rejects invalid/expired tokens with 401. |
+| **FastAPI services** | Auth-free — they trust APIM. Use `erp_core.security` to read user ID and roles from forwarded request headers. |
+| **Django Data Layer** | No auth logic whatsoever — internal only, never reachable from the internet. |
+
+#### Role-Based Access Control (RBAC)
+Roles (e.g. `legal.reader`, `marketing.admin`, `accounting.editor`) are configured in Azure Entra ID and embedded in the JWT token. APIM enforces module-level access (e.g. a Marketing user cannot call `/api/legal/*`). FastAPI services perform finer-grained checks within their module using the roles from the token claims.
 
 ### 8. AI Services
 All AI workloads run as **separate, independently deployable Container Apps**, each responsible for one group of tasks. They are coordinated by the 
