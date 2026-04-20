@@ -78,16 +78,35 @@ A shared internal Python package (`erp-core`) installed as a dependency in all F
   - FastAPI services trust the gateway — no auth logic in individual services.
 
 ### 8. AI Services
-- **LLM Provider:** Azure OpenAI Service
-  - GPT-4o for analysis, generation, and reasoning tasks.
-  - `text-embedding-3-large` for generating vector embeddings.
-  - Hosted within Azure VNet for private, secure access.
-- **AI Orchestrator:** LangGraph (Supervisor pattern)
-  - Coordinates per-task AI agents: Ingestion Agent, Analysis Agent, Generation Agent, etc.
-  - Ensures agents work together without conflict.
-- **Vector Database Strategy:**
-  - **MVP:** `pgvector` extension on existing PostgreSQL — zero additional cost or infrastructure.
-  - **Scale:** Migrate to **Azure AI Search** for hybrid search (vector + keyword), native Azure integration, and multi-module tenancy support.
+
+All AI workloads run as **separate, independently deployable Container Apps**, each responsible for one group of tasks. They are coordinated by the **AI Orchestrator** (LangGraph Supervisor) which routes tasks to the appropriate agent service via Azure Service Bus.
+
+#### 8.1 AI Orchestrator — LangGraph Supervisor
+- Receives AI task requests from FastAPI module services (via Service Bus or direct HTTP).
+- Determines which AI agent service(s) to invoke and in what order.
+- Aggregates results and returns them to the requesting service.
+- Scales to zero when no tasks are queued.
+
+#### 8.2 AI Agent Services
+
+| Service | Container | Responsibility |
+|---------|-----------|---------------|
+| **Ingestion Agent** | `acr/ai-ingestion` | Extracts raw text and metadata from uploaded files (PDF, DOCX, XLSX, images via OCR). Chunks content and stores embeddings in pgvector / Azure AI Search. |
+| **Analysis Agent** | `acr/ai-analysis` | Analyses structured or unstructured content: clause risk scoring, financial anomaly detection, campaign performance insights. Calls GPT-4o. |
+| **Generation Agent** | `acr/ai-generation` | Generates content: legal summaries, marketing copy, financial narratives, email drafts. Calls GPT-4o. |
+| **Classification Agent** | `acr/ai-classification` | Fast, cheap triage: categorises documents, routes tasks, detects intent. Uses **GPT-4o-mini** to minimise cost. |
+| **Search Agent** | `acr/ai-search` | Semantic search across all module data using vector similarity (pgvector or Azure AI Search). Returns ranked, cited results. |
+
+#### 8.3 LLM Provider
+- **Azure OpenAI Service** — all agent services call Azure OpenAI APIs, no local model inference.
+  - GPT-4o: Analysis, Generation agents.
+  - GPT-4o-mini: Classification, light summarization (15× cheaper).
+  - `text-embedding-3-large`: Ingestion Agent for embedding generation.
+- Hosted within Azure VNet via private endpoint — no public internet exposure.
+
+#### 8.4 Vector Database Strategy
+- **MVP:** `pgvector` extension on existing PostgreSQL — zero additional infrastructure.
+- **Scale:** Migrate to **Azure AI Search** for hybrid search (vector + keyword), native Azure integration, and multi-module index separation.
 
 ### 9. Async Messaging
 - **Production:** Azure Service Bus (fully managed, queues + topics/subscriptions)
@@ -117,7 +136,12 @@ Every service is a **separate Docker container** deployed as an independent **Az
 | **Legal FastAPI** | `acr/legal-api` | 1 | 10 | Internal (via APIM) | Uvicorn |
 | **Marketing FastAPI** | `acr/marketing-api` | 1 | 10 | Internal (via APIM) | Uvicorn |
 | **Accounting FastAPI** | `acr/accounting-api` | 1 | 10 | Internal (via APIM) | Uvicorn |
-| **AI Orchestrator** | `acr/ai-orchestrator` | 0 | 5 | Internal only | LangGraph; calls Azure OpenAI API; scales to zero when idle |
+| **AI Orchestrator** | `acr/ai-orchestrator` | 0 | 3 | Internal only | LangGraph Supervisor; routes tasks to AI agents; scales to zero when idle |
+| **AI — Ingestion Agent** | `acr/ai-ingestion` | 0 | 5 | Internal only | File parsing, chunking, embedding; scales to zero when queue empty |
+| **AI — Analysis Agent** | `acr/ai-analysis` | 0 | 5 | Internal only | GPT-4o powered analysis; scales to zero when queue empty |
+| **AI — Generation Agent** | `acr/ai-generation` | 0 | 5 | Internal only | GPT-4o powered content generation; scales to zero when queue empty |
+| **AI — Classification Agent** | `acr/ai-classification` | 0 | 8 | Internal only | GPT-4o-mini triage/routing; cheapest agent, scales aggressively |
+| **AI — Search Agent** | `acr/ai-search` | 0 | 5 | Internal only | Vector + keyword search across all modules; scales to zero when idle |
 | **Celery Worker** | `acr/celery-worker` | 0 | 8 | None (no ingress) | Background tasks; scales to zero when queue empty |
 
 #### Traffic Flow
@@ -143,6 +167,12 @@ Azure Front Door (CDN + WAF + TLS termination)
                         Azure DB for PostgreSQL (outside ACA env)
 
                         AI Orchestrator ──► Azure OpenAI API (HTTPS)
+                            │
+                            ├──► ai-ingestion.internal.env
+                            ├──► ai-analysis.internal.env
+                            ├──► ai-generation.internal.env
+                            ├──► ai-classification.internal.env
+                            └──► ai-search.internal.env
 ```
 
 #### Key Deployment Rules
@@ -165,9 +195,14 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | Marketing FastAPI | HTTP concurrent requests | 1 | 10 | ❌ (prod) / ✅ (dev) |
 | Accounting FastAPI | HTTP concurrent requests | 1 | 10 | ❌ (prod) / ✅ (dev) |
 | Django Core | HTTP concurrent requests | 1 | 6 | ❌ (prod) / ✅ (dev) |
-| AI Orchestrator | Azure Service Bus queue depth | 0 | 5 | ✅ Always |
-| Celery Worker | Azure Service Bus queue depth | 0 | 8 | ✅ Always |
 | All Frontends | HTTP concurrent requests | 1 | 5 | ❌ (prod) / ✅ (dev) |
+| AI Orchestrator | Azure Service Bus queue depth | 0 | 3 | ✅ Always |
+| AI — Ingestion Agent | Azure Service Bus queue depth | 0 | 5 | ✅ Always |
+| AI — Analysis Agent | Azure Service Bus queue depth | 0 | 5 | ✅ Always |
+| AI — Generation Agent | Azure Service Bus queue depth | 0 | 5 | ✅ Always |
+| AI — Classification Agent | Azure Service Bus queue depth | 0 | 8 | ✅ Always |
+| AI — Search Agent | HTTP concurrent requests | 0 | 5 | ✅ Always |
+| Celery Worker | Azure Service Bus queue depth | 0 | 8 | ✅ Always |
 
 > Default scale trigger: **10 concurrent HTTP requests per replica** before adding a new instance. Configurable per app.
 
@@ -311,8 +346,9 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | Frontend Shell | React.js + Webpack Module Federation (Shell App) |
 | Module Frontends | React.js (3 Remote Apps via Module Federation) |
 | Auth / API Gateway | Azure API Management + Azure Entra ID (OAuth2/JWT) |
-| AI Models | Azure OpenAI (GPT-4o + text-embedding-3-large) |
-| AI Orchestration | LangGraph (Supervisor pattern) |
+| AI Models | Azure OpenAI (GPT-4o + GPT-4o-mini + text-embedding-3-large) |
+| AI Orchestration | LangGraph Supervisor — coordinates 5 specialist AI agents |
+| AI Agents | Ingestion, Analysis, Generation, Classification, Search (each a separate Container App) |
 | Vector DB | pgvector (MVP) → Azure AI Search (scale) |
 | Async Messaging | Azure Service Bus (prod) / RabbitMQ (local dev) |
 | Cache | Azure Cache for Redis |
