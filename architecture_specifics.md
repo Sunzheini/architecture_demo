@@ -2,7 +2,8 @@
 **Last Updated:** April 20, 2026
 
 ## Overview
-A web-based ERP application consisting of 3 independently usable modules: **Legal**, **Marketing**, and **Accounting**. Each module can be used standalone or as part of the integrated platform.
+A web-based ERP application consisting of 3 independently usable modules: **Legal**, **Marketing**, and **Accounting**. 
+Each module can be used standalone or as part of the integrated platform.
 
 ---
 
@@ -12,7 +13,8 @@ A web-based ERP application consisting of 3 independently usable modules: **Lega
 - **Technology:** React.js (TypeScript)
 - **Pattern:** Webpack Module Federation
 - The **Shell App** hosts the core frontend: shared styles, design system, navigation, and global auth state.
-- Shared dependencies (React, design system) are loaded once from the shell using `singleton: true` in Module Federation config to prevent version conflicts.
+- Shared dependencies (React, design system) are loaded once from the shell using `singleton: true` in Module Federation 
+config to prevent version conflicts.
 
 ### 2. Frontend — Module Frontends (Micro-Frontend Remotes)
 - **3 Remote Apps:** Legal, Marketing, Accounting — each an independent React.js application.
@@ -20,15 +22,16 @@ A web-based ERP application consisting of 3 independently usable modules: **Lega
 - Each module team can build, test, and deploy their frontend **independently** without redeploying the shell.
 - Responsive design (desktop, tablet, mobile) with WCAG accessibility compliance.
 
-### 3. Core Backend — Django
+### 3. Data Layer — Django
 - **Technology:** Django (Python)
-- **Responsibility:** Data layer only — ORM, database migrations, admin panel, and shared data models.
+- **Responsibility:** Database management only — ORM, schema migrations, admin panel, and shared data models. It is **not** a general backend; it owns 
+the database and nothing else.
 - Django owns the PostgreSQL connection and all schema migrations.
-- FastAPI services must **not** write directly to the DB — they interact via Django's internal service layer or a shared `core` Python package.
+- FastAPI services must **not** write directly to the DB — they interact via Django's internal service layer or the shared `erp-core` Python package.
 
 ### 4. Shared Backend Core — Python Package (`erp-core`)
-
-A shared internal Python package (`erp-core`) installed as a dependency in all FastAPI services and the Django backend. It contains all common cross-cutting logic so no service reimplements it independently.
+A shared internal Python package (`erp-core`) installed as a dependency in all FastAPI services and the Django backend. It contains all common 
+cross-cutting logic so no service reimplements it independently.
 
 - **Package location (monorepo):** `/packages/erp-core`
 - **Installed via:** `pip install -e ../../packages/erp-core` in each service's `pyproject.toml`
@@ -38,7 +41,7 @@ A shared internal Python package (`erp-core`) installed as a dependency in all F
 |--------|------|----------------|
 | Logging | `erp_core/logging.py` | Structured JSON logging with `correlation_id`, `service_name`, `user_id` fields; OpenTelemetry trace injection |
 | Config | `erp_core/config.py` | Pydantic `BaseSettings` class; loads from Azure Key Vault + env vars with validation |
-| Interfaces | `erp_core/interfaces/` | Abstract base classes (ABCs) for service-layer patterns: `BaseService`, `BaseRepository`, `BaseEventPublisher` |
+| Interfaces | `erp_core/interfaces/` | Abstract base classes (ABCs) for service-layer patterns: `BaseService`, `BaseRepository`, `BaseEventPublisher`, `BaseAIAgent` |
 | Exceptions | `erp_core/exceptions.py` | Shared exception hierarchy (`AppError`, `NotFoundError`, `ConflictError`, `ValidationError`) mapped to HTTP status codes |
 | Middleware | `erp_core/middleware/` | FastAPI middleware for: request ID injection, structured access logging, error response formatting |
 | Messaging | `erp_core/messaging/` | Azure Service Bus publisher/subscriber base classes; RabbitMQ adapter for local dev |
@@ -51,15 +54,16 @@ A shared internal Python package (`erp-core`) installed as a dependency in all F
 - **Versioning:** `erp-core` uses semantic versioning; breaking changes require a major version bump and a migration note in `CHANGELOG.md`.
 
 ---
-
 ### 5. Module Backend Services — FastAPI
 - **Technology:** FastAPI (Python), one service per module (Legal, Marketing, Accounting).
 - **Responsibility:** Business logic, module-specific API endpoints, async task handling.
 - All services import `erp-core` for logging, config, middleware, messaging, and base interfaces — no duplication of cross-cutting concerns.
+- All **AI agent services** also import `erp-core` — they use `BaseAIAgent`, structured logging, Azure Key Vault config, and the Service Bus messaging base classes.
 - Services are **auth-free** — authentication is enforced at the API Gateway level before requests reach FastAPI.
 - Communication between module services uses **Azure Service Bus** (async/event-driven).
 - **All inter-service communication must be governed by explicit API contracts**, defined as shared Pydantic v2 models in a `contracts` package (monorepo: `/packages/contracts`). See [`documentation/api_contracts.md`](documentation/api_contracts.md) for the full contract specifications.
 - Contract compliance is enforced in CI via **Pact** consumer-driven contract testing — no service may be deployed if it violates a contract.
+- AI agent input/output schemas are also defined in the `contracts` package as Pydantic v2 models (`IngestionRequest`, `AnalysisResult`, `GenerationRequest`, etc.) to ensure the Orchestrator and agents stay in sync.
 
 ### 6. Database — PostgreSQL with Separate Schemas
 - **Technology:** Azure Database for PostgreSQL (Flexible Server), Multi-AZ for high availability.
@@ -78,8 +82,8 @@ A shared internal Python package (`erp-core`) installed as a dependency in all F
   - FastAPI services trust the gateway — no auth logic in individual services.
 
 ### 8. AI Services
-
-All AI workloads run as **separate, independently deployable Container Apps**, each responsible for one group of tasks. They are coordinated by the **AI Orchestrator** (LangGraph Supervisor) which routes tasks to the appropriate agent service via Azure Service Bus.
+All AI workloads run as **separate, independently deployable Container Apps**, each responsible for one group of tasks. They are coordinated by the 
+**AI Orchestrator** (LangGraph Supervisor) which routes tasks to the appropriate agent service via Azure Service Bus.
 
 #### 8.1 AI Orchestrator — LangGraph Supervisor
 - Receives AI task requests from FastAPI module services (via Service Bus or direct HTTP).
@@ -88,7 +92,6 @@ All AI workloads run as **separate, independently deployable Container Apps**, e
 - Scales to zero when no tasks are queued.
 
 #### 8.2 AI Agent Services
-
 | Service | Container | Responsibility |
 |---------|-----------|---------------|
 | **Ingestion Agent** | `acr/ai-ingestion` | Extracts raw text and metadata from uploaded files (PDF, DOCX, XLSX, images via OCR). Chunks content and stores embeddings in pgvector / Azure AI Search. |
@@ -113,26 +116,39 @@ All AI workloads run as **separate, independently deployable Container Apps**, e
 - **Local Development:** RabbitMQ via Docker Compose
 - Used for: inter-module events, background AI tasks, audit log streaming, notifications.
 
+**Dedicated AI queues:**
+
+| Queue / Topic | Producer | Consumer |
+|---------------|----------|----------|
+| `ai.ingestion.requests` | FastAPI module services | Ingestion Agent |
+| `ai.analysis.requests` | Orchestrator | Analysis Agent |
+| `ai.generation.requests` | Orchestrator | Generation Agent |
+| `ai.classification.requests` | Orchestrator | Classification Agent |
+| `ai.search.requests` | FastAPI module services | Search Agent |
+| `ai.results` | All AI agents | Orchestrator (aggregates results) |
+| `module.events` | All FastAPI services | Cross-module subscribers |
+
 ### 10. Caching & Load Balancing
 - **Cache:** Azure Cache for Redis (clustered mode)
   - Session storage, rate limiting, AI response caching to reduce Azure OpenAI costs.
 - **Load Balancing:** Azure API Management + Azure Container Apps built-in ingress (no Nginx Ingress Controller needed)
 
 ### 11. Deployment — Azure Container Apps (ACA)
+Every service is a **separate Docker container** deployed as an independent **Azure Container App** inside a shared **Container Apps Environment** 
+(one per environment: dev / staging / prod). There are **no VMs to manage** — Azure handles all underlying infrastructure. You pay only for actual 
+CPU and memory consumed per second, with native scale-to-zero.
 
-Every service is a **separate Docker container** deployed as an independent **Azure Container App** inside a shared **Container Apps Environment** (one per environment: dev / staging / prod). There are **no VMs to manage** — Azure handles all underlying infrastructure. You pay only for actual CPU and memory consumed per second, with native scale-to-zero.
-
-> **Why ACA over AKS:** AI services call Azure OpenAI API only — no local model inference, no GPU nodes required. ACA eliminates VM baseline costs, provides native scale-to-zero, and reduces operational overhead significantly while fully supporting our microservices architecture.
+> **Why ACA over AKS:** AI services call Azure OpenAI API only — no local model inference, no GPU nodes required. ACA eliminates VM 
+> baseline costs, provides native scale-to-zero, and reduces operational overhead significantly while fully supporting our microservices architecture.
 
 #### Container App Map
-
 | Service | Container Image | Min Replicas | Max Replicas | Ingress | Notes |
 |---------|----------------|-------------|-------------|---------|-------|
 | **Shell Frontend** | `acr/shell-frontend` | 1 | 5 | External (public) | Nginx serving static React build |
 | **Legal Frontend** | `acr/legal-frontend` | 1 | 5 | External (public) | Nginx serving static React build |
 | **Marketing Frontend** | `acr/marketing-frontend` | 1 | 5 | External (public) | Nginx serving static React build |
 | **Accounting Frontend** | `acr/accounting-frontend` | 1 | 5 | External (public) | Nginx serving static React build |
-| **Django Core** | `acr/django-core` | 1 | 6 | Internal only | Gunicorn + Django; unreachable from internet |
+| **Django Data Layer** | `acr/django-core` | 1 | 6 | Internal only | Gunicorn + Django; DB management only; unreachable from internet |
 | **Legal FastAPI** | `acr/legal-api` | 1 | 10 | Internal (via APIM) | Uvicorn |
 | **Marketing FastAPI** | `acr/marketing-api` | 1 | 10 | Internal (via APIM) | Uvicorn |
 | **Accounting FastAPI** | `acr/accounting-api` | 1 | 10 | Internal (via APIM) | Uvicorn |
@@ -145,7 +161,6 @@ Every service is a **separate Docker container** deployed as an independent **Az
 | **Celery Worker** | `acr/celery-worker` | 0 | 8 | None (no ingress) | Background tasks; scales to zero when queue empty |
 
 #### Traffic Flow
-
 ```
 User Browser
     │
@@ -161,7 +176,7 @@ Azure Front Door (CDN + WAF + TLS termination)
                         └──► accounting-api.internal.env
                                     │
                                     ▼
-                        django-core.internal.env  (internal only)
+                        django-data-layer.internal.env  (DB management only, internal)
                                     │
                                     ▼
                         Azure DB for PostgreSQL (outside ACA env)
@@ -176,17 +191,15 @@ Azure Front Door (CDN + WAF + TLS termination)
 ```
 
 #### Key Deployment Rules
-
 - **No VMs to manage.** Azure Container Apps Environment runs on serverless infrastructure — you define CPU/memory per container, Azure handles placement.
 - **Frontends** are built to static files (`npm run build`) and served by a minimal Nginx container.
-- **Django Core** has internal-only ingress. Only FastAPI Container Apps and the AI Orchestrator can reach it by internal DNS (`django-core` within the environment).
+- **Django Data Layer** has internal-only ingress. Only FastAPI Container Apps and the AI Orchestrator can reach it by internal DNS (`django-data-layer` within the environment).
 - **Each Container App** has its own `Dockerfile` and its own CI/CD pipeline — fully independent deployments.
 - **`erp-core` package** is baked into each backend container image at build time (`pip install`). It is not a running service.
 - **Environments:** `dev`, `staging`, and `prod` are separate Container Apps Environments, each in its own Azure Resource Group.
 - **Secrets** are never baked into images — injected at runtime via **Azure Key Vault** references in Container App configuration.
 
 #### Autoscaling Strategy
-
 Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No HPA, KEDA, or Cluster Autoscaler configuration needed — it is all declarative per container app.
 
 | Service | Scale Trigger | Min | Max | Scale-to-zero |
@@ -194,7 +207,7 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | Legal FastAPI | HTTP concurrent requests | 1 | 10 | ❌ (prod) / ✅ (dev) |
 | Marketing FastAPI | HTTP concurrent requests | 1 | 10 | ❌ (prod) / ✅ (dev) |
 | Accounting FastAPI | HTTP concurrent requests | 1 | 10 | ❌ (prod) / ✅ (dev) |
-| Django Core | HTTP concurrent requests | 1 | 6 | ❌ (prod) / ✅ (dev) |
+| Django Data Layer | HTTP concurrent requests | 1 | 6 | ❌ (prod) / ✅ (dev) |
 | All Frontends | HTTP concurrent requests | 1 | 5 | ❌ (prod) / ✅ (dev) |
 | AI Orchestrator | Azure Service Bus queue depth | 0 | 3 | ✅ Always |
 | AI — Ingestion Agent | Azure Service Bus queue depth | 0 | 5 | ✅ Always |
@@ -212,10 +225,39 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 - Dev and staging environments scale all apps to zero overnight via minimum replica schedules.
 
 ### 12. CI/CD Pipeline
-- **Technology:** GitHub Actions or Azure DevOps Pipelines
-- Per-service pipelines: lint → unit tests → integration tests → build Docker image → push to **Azure Container Registry (ACR)** → deploy to **Azure Container Apps** via `az containerapp update`.
-- Environment promotion: dev → staging → prod with manual approval gate before prod.
-- Each Container App is updated independently — deploying Legal FastAPI does not touch Marketing FastAPI.
+- **Platform:** **GitHub Actions** (recommended — Microsoft-owned, native Azure integrations, free for public repos, tight ACR/ACA support via official actions).
+- **Pattern:** Polyrepo — each repository has its own independent pipeline. A push to `main` on any repo triggers build → test → deploy for that service only. No other services are affected.
+
+#### Per-Service Pipeline (runs on every push to `main`)
+```
+push to main
+    │
+    ├── lint + type check
+    ├── unit tests (pytest / Jest)
+    ├── integration tests
+    │
+    ├── docker build
+    ├── push image to Azure Container Registry (ACR)
+    │     tag: <sha>  +  latest
+    │
+    └── az containerapp update
+          --name <service-name>
+          --resource-group <env-rg>
+          --image <acr-name>.azurecr.io/<service>:<sha>
+```
+
+#### Environment Promotion
+| Branch | Auto-deploys to | Gate |
+|--------|----------------|------|
+| `main` | `dev` environment | Automatic on every merge |
+| Release tag `v*` | `staging` environment | Automatic on tag push |
+| Manual approval | `prod` environment | GitHub Environment protection rule — requires reviewer sign-off |
+
+#### Shared Package Pipelines (`erp-core`, `contracts`)
+`erp-core` and `contracts` are not deployed as services — they are Python packages. Their pipeline:
+1. Run tests.
+2. On version tag (e.g. `v1.2.0`) → build wheel → publish to **GitHub Packages** (private PyPI).
+3. Each service repo pins a specific version in its `pyproject.toml` — a Dependabot PR is auto-raised in all dependent repos when a new version is published.
 
 ### 13. Monitoring & Logging
 - **Metrics & Dashboards:** Azure Monitor + Container Apps built-in metrics (CPU, memory, replica count, request latency) fed into **Grafana** via Azure Monitor data source.
@@ -247,23 +289,51 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 - **ADRs:** Architecture Decision Records for all major decisions (stored in `/docs/adr`).
 - **Codebase:** Docstrings enforced via linting; README per service.
 
-### 18. Version Control
-- **Git** with GitHub or Azure DevOps Repos.
-- Monorepo structure (recommended) using Nx or Turborepo for managing frontend remotes + backend services in a single repo with independent deployment.
+### 18. Version Control — GitHub (Polyrepo)
+**Platform:** GitHub. Chosen over GitLab for native Azure integration (Microsoft ecosystem), GitHub Actions built-in CI/CD, GitHub Packages for private Python packages, and GitHub Environments for deployment gates.
+**Structure:** **Polyrepo** — one repository per deployable service or shared package. Each team owns their repo independently; no coordination needed for unrelated deployments.
+
+#### Repository Map
+| Repository | Type | Description |
+|------------|------|-------------|
+| `erp-core` | Python package | Shared backend infrastructure package. Published to GitHub Packages on version tag. |
+| `erp-contracts` | Python package | Shared Pydantic v2 contracts for all inter-service communication. Published to GitHub Packages. |
+| `erp-shell-frontend` | Container App | React.js Shell (Micro-Frontend host) |
+| `erp-legal-frontend` | Container App | React.js Legal module frontend |
+| `erp-marketing-frontend` | Container App | React.js Marketing module frontend |
+| `erp-accounting-frontend` | Container App | React.js Accounting module frontend |
+| `erp-django-core` | Container App | Django ORM / data layer |
+| `erp-legal-api` | Container App | Legal FastAPI service |
+| `erp-marketing-api` | Container App | Marketing FastAPI service |
+| `erp-accounting-api` | Container App | Accounting FastAPI service |
+| `erp-ai-orchestrator` | Container App | LangGraph AI Orchestrator |
+| `erp-ai-ingestion` | Container App | AI Ingestion Agent |
+| `erp-ai-analysis` | Container App | AI Analysis Agent |
+| `erp-ai-generation` | Container App | AI Generation Agent |
+| `erp-ai-classification` | Container App | AI Classification Agent |
+| `erp-ai-search` | Container App | AI Search Agent |
+| `erp-celery-worker` | Container App | Background task worker |
+| `erp-infrastructure` | IaC only | Bicep / Terraform for all Azure resources (ACA environments, ACR, PostgreSQL, Redis, etc.) |
+
+#### Branch Strategy (per repo)
+- `main` — production-ready code; protected, requires PR + passing CI.
+- `develop` — integration branch for feature work.
+- Feature branches — short-lived, merged to `develop` via PR.
+- Release tags (`v1.0.0`) — trigger staging and prod deployments.
 
 ---
-
 ## Cost Estimation (Azure, per day)
 
-> **Assumptions:** Single Azure region, Azure West Europe pricing (April 2026). ACA Consumption plan: $0.000004/vCPU-second, $0.0000005/GiB-second. Dev/staging scale to zero overnight. No VMs — you pay only for actual container usage.
+> **Assumptions:** Single Azure region, Azure West Europe pricing (April 2026). ACA Consumption plan: 
+$0.000004/vCPU-second, $0.0000005/GiB-second. Dev/staging scale to zero overnight. No VMs — you pay only for actual container usage.
 
 ### Scenario 1 — MVP / Development Phase
 *Small internal team, dev environment, scale-to-zero for all services when idle.*
 
 | Component | Config | Daily Cost |
 |-----------|--------|-----------|
-| ACA Compute | 8 containers, ~0.25 vCPU / 0.5 GB avg, ~6 hrs active | $2 |
-| ACA Compute — AI Orchestrator + Celery | Scale-to-zero, ~1 hr/day active | $0.10 |
+| ACA Compute | 8 app containers (APIs + Django + Frontends), ~0.25 vCPU / 0.5 GB avg, ~6 hrs active | $2 |
+| ACA Compute — AI services (7 containers) | Orchestrator + 5 Agents + Celery, scale-to-zero, ~1 hr/day combined | $0.20 |
 | Azure DB for PostgreSQL | 2 vCore, 8 GB RAM, no HA | $5 |
 | Azure API Management | Developer tier | $2 |
 | Azure Cache for Redis | C0 Basic (250 MB) | $1 |
@@ -285,7 +355,7 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | Component | Config | Daily Cost |
 |-----------|--------|-----------|
 | ACA Compute — APIs + Django + Frontends | 8 containers, min 1 replica 24/7, avg 0.5 vCPU / 1 GB | $5 |
-| ACA Compute — AI Orchestrator + Celery | Scale-to-zero, ~4 hrs/day active, 0.5 vCPU / 1 GB | $0.50 |
+| ACA Compute — AI services (7 containers) | Orchestrator + 5 Agents + Celery, scale-to-zero, ~4 hrs/day combined active | $1 |
 | Azure DB for PostgreSQL | 4 vCore, 16 GB RAM, Multi-AZ HA | $16 |
 | Azure API Management | Standard tier | $7 |
 | Azure Cache for Redis | C1 Standard (1 GB) | $1.30 |
@@ -309,7 +379,7 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | Component | Config | Daily Cost |
 |-----------|--------|-----------|
 | ACA Compute — APIs + Django + Frontends | 8 containers, avg 5 replicas, 1 vCPU / 2 GB, 24/7 | $20 |
-| ACA Compute — AI Orchestrator + Celery | Scale-to-zero, avg 3 replicas, 1 vCPU / 2 GB, 10 hrs/day | $3 |
+| ACA Compute — AI services (7 containers) | Orchestrator + 5 Agents + Celery, scale-to-zero, avg 3 replicas each, 1 vCPU / 2 GB, ~10 hrs/day | $6 |
 | Azure DB for PostgreSQL | 8 vCore, 32 GB RAM, Multi-AZ HA | $30 |
 | Azure API Management | Standard tier | $7 |
 | Azure Cache for Redis | C2 Standard (6 GB) | $3 |
@@ -321,9 +391,9 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | Azure Key Vault | High operations | $0.50 |
 | Azure Blob Storage | 1 TB | $0.60 |
 | Azure Monitor / Log Analytics | 10 GB/day ingested | $23 |
-| **Total** | | **~$184 / day (~$5,520 / month)** |
+| **Total** | | **~$187 / day (~$5,610 / month)** |
 
-> **vs AKS equivalent: ~$340/day — 46% cheaper**
+> **vs AKS equivalent: ~$340/day — 45% cheaper**
 
 ---
 
@@ -340,7 +410,7 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 
 | Layer | Technology |
 |-------|------------|
-| Core Data Backend | Django + PostgreSQL (Azure DB for PostgreSQL) |
+| Data Layer (DB management) | Django + PostgreSQL (Azure DB for PostgreSQL) |
 | Shared Backend Core | `erp-core` Python package (`/packages/erp-core`) |
 | Module APIs | FastAPI (one service per module) |
 | Frontend Shell | React.js + Webpack Module Federation (Shell App) |
@@ -353,7 +423,8 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | Async Messaging | Azure Service Bus (prod) / RabbitMQ (local dev) |
 | Cache | Azure Cache for Redis |
 | Deployment | Azure Container Apps (ACA) — Consumption plan, no VMs |
-| CI/CD | GitHub Actions / Azure DevOps |
+| CI/CD | GitHub Actions (per-repo pipelines, auto-deploy to ACA on push to main) |
+| Version Control | GitHub — Polyrepo (1 repo per service + 2 shared packages + 1 IaC repo) |
 | Monitoring | Azure Monitor + Grafana + Application Insights |
 | Secrets | Azure Key Vault |
 | Storage | Azure Blob Storage |
