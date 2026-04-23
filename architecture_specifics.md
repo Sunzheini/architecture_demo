@@ -246,22 +246,25 @@ Azure Front Door (CDN + WAF + TLS termination)
 #### Autoscaling Strategy
 Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No HPA, KEDA, or Cluster Autoscaler configuration needed — it is all declarative per container app.
 
-| Service | Scale Trigger | Min | Max | Scale-to-zero |
-|---------|--------------|-----|-----|---------------|
+> **RabbitMQ vs autoscaling:** RabbitMQ is used **only in local development** (Docker Compose). It has no autoscaling — you run a fixed set of containers locally. In **production and staging**, Azure Service Bus is used, and its queue depth natively drives ACA autoscaling for all AI agents and Celery workers. The `erp-core` messaging abstraction (`BaseEventPublisher` / subscriber) means no code change is needed between environments — only a config switch (`MESSAGING_BACKEND=azure_service_bus` vs `rabbitmq`).
+
+| Service | Scale Trigger (prod) | Min | Max | Scale-to-zero |
+|---------|----------------------|-----|-----|---------------|
 | Legal FastAPI | HTTP concurrent requests | 1 | 10 | ❌ (prod) / ✅ (dev) |
 | Marketing FastAPI | HTTP concurrent requests | 1 | 10 | ❌ (prod) / ✅ (dev) |
 | Accounting FastAPI | HTTP concurrent requests | 1 | 10 | ❌ (prod) / ✅ (dev) |
 | Django Data Layer | HTTP concurrent requests | 1 | 6 | ❌ (prod) / ✅ (dev) |
 | All Frontends | HTTP concurrent requests | 1 | 5 | ❌ (prod) / ✅ (dev) |
-| AI Orchestrator | Azure Service Bus queue depth | 0 | 3 | ✅ Always |
-| AI — Ingestion Agent | Azure Service Bus queue depth | 0 | 5 | ✅ Always |
-| AI — Analysis Agent | Azure Service Bus queue depth | 0 | 5 | ✅ Always |
-| AI — Generation Agent | Azure Service Bus queue depth | 0 | 5 | ✅ Always |
-| AI — Classification Agent | Azure Service Bus queue depth | 0 | 8 | ✅ Always |
+| AI Orchestrator | Azure Service Bus queue depth (`ai.*` topics) | 0 | 3 | ✅ Always |
+| AI — Ingestion Agent | Azure Service Bus queue depth (`ai.ingestion.requests`) | 0 | 5 | ✅ Always |
+| AI — Analysis Agent | Azure Service Bus queue depth (`ai.analysis.requests`) | 0 | 5 | ✅ Always |
+| AI — Generation Agent | Azure Service Bus queue depth (`ai.generation.requests`) | 0 | 5 | ✅ Always |
+| AI — Classification Agent | Azure Service Bus queue depth (`ai.classification.requests`) | 0 | 8 | ✅ Always |
 | AI — Search Agent | HTTP concurrent requests | 0 | 5 | ✅ Always |
-| Celery Worker | Azure Service Bus queue depth | 0 | 8 | ✅ Always |
+| Celery Worker | Azure Service Bus queue depth (background task queue) | 0 | 8 | ✅ Always |
 
-> Default scale trigger: **10 concurrent HTTP requests per replica** before adding a new instance. Configurable per app.
+> Default HTTP scale trigger: **10 concurrent requests per replica** before adding a new instance. Configurable per app.
+> Default queue scale trigger: **1 active message per replica** — i.e. if there are 5 messages unprocessed, ACA will spin up 5 replicas (up to the configured Max). Configurable per app.
 
 **Cost guardrails:**
 - Azure Budget Alerts fire at 80% and 100% of monthly spend targets.
