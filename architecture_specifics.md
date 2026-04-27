@@ -1,6 +1,14 @@
 # Architecture Specification
 **Last Updated:** April 20, 2026
 
+## Team
+Frontend: Veronika, Yoana
+Database: Ivan, Dimo
+Backend: Veronika, Ivan, Martin, Evsin
+QA: Gosho
+Devops: Dimo, Martin
+
+
 ## Overview
 A web-based ERP application consisting of 3 independently usable modules: **Legal**, **Marketing**, and **Accounting**. 
 Each module can be used standalone or as part of the integrated platform.
