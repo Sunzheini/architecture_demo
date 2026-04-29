@@ -5,6 +5,5 @@ docker run -it --rm --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:4-manag
 user: guest, pass: guest
 
 
-According to the team and the architecture in the file architecture-specifics.md I created sample 
-tasks in documentation/Tasks.xlsx. Edit them if necessary and create an md file with the updated 
-tasks
+There is an architecture plan inside architecture_specifics.md. There is a plan of the required 
+tasks for this arhitecture and needed resources in Tasks.md. Analyze it for areas of improvement.

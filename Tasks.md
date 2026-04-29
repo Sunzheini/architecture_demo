@@ -63,8 +63,10 @@
 | CORE-10 | Implement `erp_core/security.py` — JWT claim extraction helpers (user ID, roles, module access) from APIM-forwarded headers | `erp_core/security.py` | CORE-01 | 2 |
 | CORE-11 | Implement `erp_core/constants.py` — shared enums: `ModuleName`, `AuditAction`, `EventType` | `erp_core/constants.py` | CORE-01 | 1 |
 | CORE-12 | Write unit tests for all `erp-core` modules (≥90% coverage) | `tests/` in `erp-core` repo | CORE-02–CORE-11 | 5 |
-| CORE-13 | Publish `erp-core` v1.0.0 to GitHub Packages | GitHub Packages private PyPI entry | CORE-12 | 1 |
-| **Group total** | | | | **29** |
+| CORE-13 | Publish `erp-core` **v1.0.0** to GitHub Packages (without Django client — unblocks Django + FastAPI scaffolding) | GitHub Packages private PyPI entry | CORE-12 | 1 |
+| CORE-14 | Implement `erp_core/clients/django_client.py` — typed async client for the Django internal REST API (auto-generated from Django's OpenAPI schema using `openapi-python-client`); wraps `erp_core/http_client.py` with managed-identity auth, retries, and `BaseRepository` interface compliance | `erp_core/clients/django_client.py`; CI step that regenerates the client when the Django OpenAPI schema changes | CORE-08, DB-17 | 3 |
+| CORE-15 | Publish `erp-core` **v1.1.0** to GitHub Packages (includes Django client) — required by all FastAPI services | GitHub Packages release | CORE-14 | 1 |
+| **Group total** | | | | **33** |
 
 ### `erp-contracts` Pydantic Package
 > Area: **Backend** | Repo: `erp-contracts`
@@ -103,15 +105,17 @@
 | DB-13 | Implement Django admin panel (internal management UI) | `admin.py` registrations for all models | DB-10 | 3 |
 | DB-14 | Implement RBAC models aligned with Azure Entra ID roles (read roles from JWT claims, no local password management) | `rbac/models.py`, `rbac/service.py` — role-to-permission mapping only | DB-10, INFRA-11 | 4 |
 | DB-15 | Implement audit log middleware for Django admin actions | `middleware/audit.py` | DB-06 | 2 |
-| DB-16 | Implement internal service layer (Django → accessible by FastAPI via `erp-core` shared interfaces, not via HTTP) | `services/` in each Django app; used via `erp-core` `BaseRepository` | DB-10, CORE-06 | 4 |
-| DB-17 | Setup Django REST Framework + OpenAPI (internal API for Django admin) | DRF config, Swagger/OpenAPI schema | DB-10 | 2 |
+| DB-16 | Implement Django **internal REST API** consumed by all FastAPI services (sole DB access path — FastAPI never connects to PostgreSQL directly). Endpoints follow the pattern `/internal/v1/<schema>/<resource>` and return Pydantic-compatible JSON. Each module (legal, marketing, accounting, core) gets its own DRF viewset module. | `internal_api/` Django app; viewsets for all module models; URL routing under `/internal/v1/`; OpenAPI schema published at `/internal/v1/openapi.json` | DB-10, DB-02, DB-03, DB-04, DB-05 | 8 |
+| DB-17 | Configure DRF + `drf-spectacular` for the **internal API** (OpenAPI 3 schema generation; schema is the source of truth for the `erp-core` Django client) | DRF config; `drf-spectacular` settings; OpenAPI schema validated in CI; schema artifact published to GitHub Packages on Django release | DB-16 | 3 |
 | DB-18 | Seed permissions command (all modules) | `management/commands/seed_permissions.py` | DB-14 | 1 |
 | DB-19 | Configure Azure Database for PostgreSQL connection (SSL, connection pooling via pgBouncer) | Django `DATABASES` settings with Azure credentials from Key Vault | DB-10, INFRA-05, INFRA-08 | 2 |
 | DB-20 | Configure automated backup validation + point-in-time restore test + geo-redundant backup | Restore test runbook; `docs/runbooks/restore.md` | DB-19 | 2 |
 | DB-21 | Write Dockerfile for `erp-django-core` (internal only, Gunicorn) | `Dockerfile` | DB-10 | 1 |
-| DB-22 | Setup GitHub Actions CI/CD pipeline for `erp-django-core` | `.github/workflows/ci-cd.yml` (lint → test → build → push ACR → deploy ACA internal) | DB-21, INFRA-14 | 2 |
+| DB-22 | Setup GitHub Actions CI/CD pipeline for `erp-django-core` (publishes OpenAPI schema artifact on release) | `.github/workflows/ci-cd.yml` (lint → test → build → push ACR → deploy ACA internal → publish OpenAPI schema) | DB-21, INFRA-14, CORE-13 | 2 |
 | DB-23 | Implement GDPR compliance: PII tagging in models, soft-delete + anonymization helpers, region/data-residency configuration | `core/gdpr.py`; PII metadata on model fields; anonymize management command | DB-02–DB-05 | 3 |
-| **Group total** | | | | **55** |
+| DB-24 | Implement **service-to-service authentication** for the Django internal API (Azure Managed Identity tokens validated by Django middleware; only ACA Container Apps in the same VNet with the `internal-api-caller` role can call it) | `internal_api/auth.py` middleware; Entra ID app registration for the internal API resource; allowed-callers list per environment | DB-16, INFRA-08, INFRA-11 | 3 |
+| DB-25 | Implement **schema drift / contract test** in CI: every PR runs the FastAPI integration suite against a freshly-migrated Django container to detect breaking schema changes before merge | `.github/workflows/schema-contract.yml`; shared docker-compose for the test job | DB-16, DB-22 | 2 |
+| **Group total** | | | | **62** |
 
 ---
 
@@ -122,11 +126,11 @@
 
 | ID | Task | Deliverable | Depends On | Est. (days) |
 |----|------|-------------|------------|-------------|
-| BE-L-01 | Initialize `erp-legal-api` FastAPI project | `services/legal-api/` skeleton; `pyproject.toml` with `erp-core` + `erp-contracts` | CORE-13, CONT-08 | 1 |
-| BE-L-02 | Implement Legal Dossier CRUD endpoints | `routes/dossiers.py` | BE-L-01, DB-03 | 3 |
-| BE-L-03 | Implement Legal Case management endpoints | `routes/cases.py` | BE-L-01, DB-03 | 3 |
-| BE-L-04 | Implement Legal Deadline tracking endpoints | `routes/deadlines.py` | BE-L-01, DB-03 | 2 |
-| BE-L-05 | Implement Law Acts / Knowledge Base endpoints | `routes/law_acts.py` | BE-L-01, DB-03 | 2 |
+| BE-L-01 | Initialize `erp-legal-api` FastAPI project (data access exclusively via `erp_core.clients.django_client` — **no direct DB connection**) | `services/legal-api/` skeleton; `pyproject.toml` with `erp-core>=1.1.0` + `erp-contracts`; lint rule blocking `psycopg`/`sqlalchemy` imports | CORE-15, CONT-08 | 1 |
+| BE-L-02 | Implement Legal Dossier CRUD endpoints (delegates persistence to Django internal API) | `routes/dossiers.py` | BE-L-01, DB-16 | 3 |
+| BE-L-03 | Implement Legal Case management endpoints (via Django internal API) | `routes/cases.py` | BE-L-01, DB-16 | 3 |
+| BE-L-04 | Implement Legal Deadline tracking endpoints (via Django internal API) | `routes/deadlines.py` | BE-L-01, DB-16 | 2 |
+| BE-L-05 | Implement Law Acts / Knowledge Base endpoints (via Django internal API) | `routes/law_acts.py` | BE-L-01, DB-16 | 2 |
 | BE-L-06 | Implement document upload → trigger `ai.ingestion.requests` Service Bus message | `routes/documents.py`; Service Bus publisher | BE-L-01, CORE-07, INFRA-07 | 3 |
 | BE-L-07 | Implement AI Search integration (publish to `ai.search.requests`, consume results) | `routes/search.py` | BE-L-01, CORE-07 | 3 |
 | BE-L-08 | Implement audit logging for all write operations (via `erp-core` middleware) | Audit events in `core_audit_log` | BE-L-01, DB-06 | 2 |
@@ -139,11 +143,11 @@
 
 | ID | Task | Deliverable | Depends On | Est. (days) |
 |----|------|-------------|------------|-------------|
-| BE-M-01 | Initialize `erp-marketing-api` FastAPI project | `services/marketing-api/` skeleton | CORE-13, CONT-08 | 1 |
-| BE-M-02 | Implement Campaign management endpoints (CRUD) | `routes/campaigns.py` | BE-M-01, DB-04 | 3 |
-| BE-M-03 | Implement Lead management + lead-to-client conversion endpoints | `routes/leads.py` | BE-M-01, DB-04 | 3 |
-| BE-M-04 | Implement Ticket / Support request endpoints | `routes/tickets.py` | BE-M-01, DB-04 | 3 |
-| BE-M-05 | Implement Operator assignment + routing logic | `services/operator_service.py` | BE-M-01, DB-04 | 3 |
+| BE-M-01 | Initialize `erp-marketing-api` FastAPI project (data access exclusively via `erp_core.clients.django_client` — **no direct DB connection**) | `services/marketing-api/` skeleton; `pyproject.toml` with `erp-core>=1.1.0` | CORE-15, CONT-08 | 1 |
+| BE-M-02 | Implement Campaign management endpoints (CRUD, via Django internal API) | `routes/campaigns.py` | BE-M-01, DB-16 | 3 |
+| BE-M-03 | Implement Lead management + lead-to-client conversion endpoints (via Django internal API) | `routes/leads.py` | BE-M-01, DB-16 | 3 |
+| BE-M-04 | Implement Ticket / Support request endpoints (via Django internal API) | `routes/tickets.py` | BE-M-01, DB-16 | 3 |
+| BE-M-05 | Implement Operator assignment + routing logic (via Django internal API) | `services/operator_service.py` | BE-M-01, DB-16 | 3 |
 | BE-M-06 | Implement campaign performance analysis → trigger `ai.analysis.requests` | `routes/analytics.py`; Service Bus publisher | BE-M-01, CORE-07 | 3 |
 | BE-M-07 | Implement ETL data import (bulk lead/campaign import) | `services/etl_service.py` | BE-M-01 | 4 |
 | BE-M-08 | Write unit + integration tests | `tests/` (≥80% coverage) | BE-M-01–BE-M-07 | 5 |
@@ -155,14 +159,14 @@
 
 | ID | Task | Deliverable | Depends On | Est. (days) |
 |----|------|-------------|------------|-------------|
-| BE-A-01 | Initialize `erp-accounting-api` FastAPI project | `services/accounting-api/` skeleton | CORE-13, CONT-08 | 1 |
-| BE-A-02 | Create Chart of Accounts (NSS standard) | `routes/accounts.py`; `data/chart_of_accounts.json`; seed command | BE-A-01, DB-05 | 3 |
-| BE-A-03 | Implement Journal Entry + Journal Entry Lines endpoints | `routes/journal_entries.py`; `models/journal_entry.py` | BE-A-01, DB-05 | 4 |
+| BE-A-01 | Initialize `erp-accounting-api` FastAPI project (data access exclusively via `erp_core.clients.django_client` — **no direct DB connection**) | `services/accounting-api/` skeleton; `pyproject.toml` with `erp-core>=1.1.0` | CORE-15, CONT-08 | 1 |
+| BE-A-02 | Create Chart of Accounts (NSS standard) — persisted via Django internal API | `routes/accounts.py`; `data/chart_of_accounts.json`; seed command | BE-A-01, DB-16 | 3 |
+| BE-A-03 | Implement Journal Entry + Journal Entry Lines endpoints (via Django internal API) | `routes/journal_entries.py`; `models/journal_entry.py` | BE-A-01, DB-16 | 4 |
 | BE-A-04 | Implement double-entry validation service | `services/validation_service.py` (debit == credit check) | BE-A-03 | 2 |
-| BE-A-05 | Implement Accounting Period + Period Closure | `routes/periods.py`; `models/period.py` | BE-A-01, DB-05 | 3 |
+| BE-A-05 | Implement Accounting Period + Period Closure (via Django internal API) | `routes/periods.py`; `models/period.py` | BE-A-01, DB-16 | 3 |
 | BE-A-06 | Implement financial statement generation (Balance Sheet, P&L, Cash Flow) | `services/financial_statement_service.py` | BE-A-03, BE-A-05 | 5 |
 | BE-A-07 | Implement VAT + corporate tax declaration generation | `services/tax_service.py` | BE-A-03 | 4 |
-| BE-A-08 | Implement audit plan + findings endpoints | `routes/audit.py` | BE-A-01, DB-05 | 3 |
+| BE-A-08 | Implement audit plan + findings endpoints (via Django internal API) | `routes/audit.py` | BE-A-01, DB-16 | 3 |
 | BE-A-09 | Implement NAP inspection control dossier | `services/control_dossier_service.py` | BE-A-08 | 3 |
 | BE-A-10 | Implement risk alert engine | `services/risk_alert_service.py` | BE-A-06 | 3 |
 | BE-A-11 | Trigger AI generation for financial narratives → `ai.generation.requests` | Service Bus publisher in `services/narrative_service.py` | BE-A-01, CORE-07 | 3 |
@@ -379,9 +383,9 @@
 | Phase / Group | Est. (person-days) |
 |---|---|
 | Phase 0 — Infrastructure & DevOps | 47 |
-| Phase 1a — `erp-core` package | 29 |
+| Phase 1a — `erp-core` package | 33 |
 | Phase 1a — `erp-contracts` package | 20 |
-| Phase 1b — Data Layer (Django) | 55 |
+| Phase 1b — Data Layer (Django) | 62 |
 | Phase 2 — Legal FastAPI | 26 |
 | Phase 2 — Marketing FastAPI | 27 |
 | Phase 2 — Accounting FastAPI | 41 |
@@ -398,18 +402,18 @@
 | Phase 4 — Accounting Frontend | 25 |
 | Phase 5 — Integration, QA & Testing | 45 |
 | Phase 6 — Production Readiness | 15 |
-| **Grand Total** | **510 person-days** |
+| **Grand Total** | **521 person-days** |
 
 ### Effort by Discipline
 
 | Discipline | Est. (person-days) | Groups |
 |---|---|---|
 | **DevOps** | 47 + 15 = **62** | Phase 0, Phase 6 |
-| **Backend (shared + services + AI)** | 29 + 20 + 26 + 27 + 41 + 7 + 12 + 18 + 15 + 23 + 10 + 16 = **244** | Phase 1a, Phase 2, Phase 3 |
-| **Database (Django data layer)** | **55** | Phase 1b |
+| **Backend (shared + services + AI)** | 33 + 20 + 26 + 27 + 41 + 7 + 12 + 18 + 15 + 23 + 10 + 16 = **248** | Phase 1a, Phase 2, Phase 3 |
+| **Database (Django data layer)** | **62** | Phase 1b |
 | **Frontend** | 35 + 22 + 22 + 25 = **104** | Phase 4 |
 | **QA** | **45** | Phase 5 |
-| **Total** | **510** | |
+| **Total** | **521** | |
 
 ### Headcount Formula
 
@@ -425,11 +429,11 @@ Required FTEs (per discipline) = Discipline person-days / (Project calendar days
 | Discipline | Days | FTEs needed | Round up |
 |---|---|---|---|
 | DevOps | 62 | 62 / 84 = 0.74 | **1** |
-| Backend | 244 | 244 / 84 = 2.90 | **3** |
-| Database | 55 | 55 / 84 = 0.65 | **1** (can overlap with Backend) |
+| Backend | 248 | 248 / 84 = 2.95 | **3** |
+| Database | 62 | 62 / 84 = 0.74 | **1** (can overlap with Backend) |
 | Frontend | 104 | 104 / 84 = 1.24 | **2** |
 | QA | 45 | 45 / 84 = 0.54 | **1** |
-| **Team total** | **510** | **6.07** | **~7 people** for a 6-month MVP |
+| **Team total** | **521** | **6.21** | **~7 people** for a 6-month MVP |
 
 > Adjust the calendar days and focus factor to your actual schedule to recompute the FTE requirement.
 
