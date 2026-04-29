@@ -364,6 +364,35 @@ Every Container App runs in **multi-revision mode** with traffic splitting. A de
   - **Prompt-injection guardrails:** `erp_core.ai.prompt_guard` sanitises user-supplied input (strips system-prompt overrides), validates LLM output against the expected Pydantic schema, detects known jailbreak patterns, and enforces token caps.
   - **AI red-teaming:** prompt-injection and PII-leak suites run weekly in CI against all AI agents.
 
+#### Networking & VNet Topology
+
+Network isolation is delivered via a dedicated Terraform module (`modules/network/`, INFRA-37) consumed by every other resource module. There is one VNet per environment with **non-overlapping CIDR ranges** (dev `10.10.0.0/16`, staging `10.20.0.0/16`, prod `10.30.0.0/16`) so that future cross-env peering remains possible.
+
+**Subnets (per VNet):**
+
+| Subnet | CIDR | Delegated to | Purpose |
+|---|---|---|---|
+| `aca-infra` | `/23` (min) | `Microsoft.App/environments` | Hosts the Azure Container Apps Environment |
+| `private-endpoints` | `/24` | — | All PaaS private endpoints (Postgres, Redis, Key Vault, Storage, Service Bus, ACR, Azure OpenAI) |
+| `apim` | `/27` | — | Dedicated subnet for APIM in internal VNet mode (staging + prod) |
+| `pg-flex` | `/28` | `Microsoft.DBforPostgreSQL/flexibleServers` | Postgres Flexible Server VNet integration |
+
+**NSGs:** deny-by-default on every subnet with explicit allow rules per direction; locked down by `terraform apply`.
+
+**Private DNS zones** (linked to all VNets) for: `privatelink.postgres.database.azure.com`, `privatelink.redis.cache.windows.net`, `privatelink.vaultcore.azure.net`, `privatelink.blob.core.windows.net`, `privatelink.servicebus.windows.net`, `privatelink.azurecr.io`, `privatelink.openai.azure.com`. INFRA-38 creates a private endpoint + DNS A-record for each PaaS resource and disables public network access (`publicNetworkAccess = Disabled`).
+
+**Per-environment ingress posture:**
+
+| Environment | ACA Environment ingress | APIM SKU + mode | Public-internet exposure |
+|---|---|---|---|
+| dev | External (load-balancer with public IP) | **Developer** (~$2/day, External) | Convenience for engineers; only Front Door + APIM are reachable from the internet |
+| staging | **Internal** (VNet-only) | **Premium** (internal VNet mode) | Front Door is the only public entry point; APIM is private |
+| prod | **Internal** (VNet-only) | **Premium** (internal VNet mode) | Front Door is the only public entry point; APIM is private |
+
+> **Cost honesty:** APIM Premium is required for true VNet injection. It costs **~$93/day per environment** (vs Standard ~$23/day, Developer ~$2/day). The cost scenarios below have been updated to reflect this. If the budget cannot absorb Premium in staging, an acceptable fallback is APIM Standard with **External ingress + IP allow-list** to Front Door — at the cost of weaker network isolation.
+
+**Validation:** INFRA-41 ships a CI policy (`Test-NetConnection` probes + Checkov) that fails any plan introducing `publicNetworkAccess = Enabled` outside the explicit allow-list (Front Door, dev APIM, public ACA ingress in dev) or any consumed PaaS resource without a private endpoint in the same VNet.
+
 ### 16. Data Backup & Disaster Recovery
 - Azure Database for PostgreSQL automated backups (point-in-time restore, up to 35 days).
 - Geo-redundant backup storage for critical data.

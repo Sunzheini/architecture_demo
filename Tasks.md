@@ -79,7 +79,12 @@ In addition to the project DoD above:
 | INFRA-29 | Author Django **migration ACA Job** (separate Container App Job, not the web container's startup) wired into the `erp-django-core` deploy pipeline as a **pre-traffic** step; `python manage.py migrate --check` runs as a dry-run on every PR; job blocks the new revision from receiving traffic on failure | `modules/aca-job-migrate/`; `.github/workflows/migrate-job.yml` reusable step | INFRA-03, DB-22 | 2 |
 | INFRA-30 | Switch all FastAPI + Django ACA apps to **multi-revision mode with traffic splitting** (canary 10% → 100%); add automated **post-deploy smoke probe** (`/health`, `/ready`, 1 representative API call) and **auto-rollback** (shift traffic back to previous revision) into `.github/workflows/deploy-template.yml`; rollback SLO ≤ 2 min | Updated `deploy-template.yml`; ACA app config in Terraform sets `revisionMode = "multiple"` | INFRA-03, INFRA-14 | 3 |
 | INFRA-32 | Add **release-please** (or conventional-commits + changelog automation) to all 18 repos for automatic version bumps + per-release changelogs; configure GitHub Environment **deployment freeze windows** (e.g. no Friday-afternoon prod deploys) | `.github/workflows/release-please.yml` shipped to every repo; freeze policy in GitHub Environment protection rules | INFRA-15 | 2 |
-| **Group total** | | | | **60** |
+| INFRA-37 | Author Terraform module **`modules/network/`**: VNet per env (non-overlapping CIDRs — dev `10.10.0.0/16`, staging `10.20.0.0/16`, prod `10.30.0.0/16`), subnets (`aca-infra` delegated `/23`, `private-endpoints` `/24`, `apim` `/27`, `pg-flex` delegated), NSGs (deny-by-default + explicit allows), and **private DNS zones** for postgres / redis / keyvault / blob / servicebus / acr / openai. Apply to dev. | `modules/network/`; VNet + subnets + NSGs + private DNS zones in dev | INFRA-01 | 5 |
+| INFRA-38 | Update INFRA-05 / 06 / 07 / 08 / 12 / 13 modules to set `publicNetworkAccess = Disabled` and **create private endpoints + DNS A-records** in the zones from INFRA-37. Re-apply to dev. | All PaaS resources reachable only via private endpoint in the dev VNet | INFRA-37, INFRA-05, INFRA-06, INFRA-07, INFRA-08, INFRA-12, INFRA-13 | 3 |
+| INFRA-39 | Update INFRA-03 (ACA Environment) to inject the `aca-infra` subnet, set `internalLoadBalancerEnabled = true` for staging/prod (External for dev), and add Front Door → ACA Private Link config. | Updated `modules/aca-environment/`; ACA env runs inside the VNet | INFRA-37, INFRA-03 | 2 |
+| INFRA-40 | Update INFRA-09 (APIM) to run in **internal VNet mode**; pin SKU per env (Developer in dev, **Premium** in staging + prod). Update cost scenarios in `architecture_specifics.md` accordingly. | Updated `modules/apim/`; APIM joined to the `apim` subnet; per-env SKU `tfvars` | INFRA-37, INFRA-09 | 2 |
+| INFRA-41 | Networking validation suite: `Test-NetConnection` script + `terraform plan` policy check (Checkov/conftest) that asserts (a) no Azure resource has `publicNetworkAccess = Enabled` outside the allow-list (Front Door, APIM external for dev, ACA Environment public ingress), (b) every consumed PaaS resource has a private endpoint in the same VNet. | `.github/workflows/network-policy.yml`; required status check on `erp-infrastructure` PRs | INFRA-37, INFRA-38, INFRA-22 | 2 |
+| **Group total** | | | | **74** |
 
 ---
 
@@ -507,7 +512,7 @@ In addition to the project DoD above:
 
 | Phase / Group | Est. (person-days) |
 |---|---|
-| Phase 0 — Infrastructure & DevOps | 60 |
+| Phase 0 — Infrastructure & DevOps | 74 |
 | Phase 1a — `erp-core` package | 54 |
 | Phase 1a — `erp-contracts` package | 23 |
 | Phase 1b — Data Layer (Django) | 62 |
@@ -528,18 +533,18 @@ In addition to the project DoD above:
 | Phase 4 — Accounting Frontend | 25 |
 | Phase 5 — Integration, QA & Testing | 48 |
 | Phase 6 — Production Readiness | 22 |
-| **Grand Total** | **585 person-days** |
+| **Grand Total** | **599 person-days** |
 
 ### Effort by Discipline
 
 | Discipline | Est. (person-days) | Groups |
 |---|---|---|
-| **DevOps** | 60 + 22 = **82** | Phase 0, Phase 6 |
+| **DevOps** | 74 + 22 = **96** | Phase 0, Phase 6 |
 | **Backend (shared + services + AI)** | 54 + 23 + 31 + 29 + 43 + 7 + 12 + 18 + 15 + 21 + 10 + 16 = **279** | Phase 1a, Phase 2, Phase 3 |
 | **Database (Django data layer)** | **62** | Phase 1b |
 | **Frontend / Design** | 10 + 35 + 22 + 22 + 25 = **114** | Phase 4 |
 | **QA** | **48** | Phase 5 |
-| **Total** | **585** | |
+| **Total** | **599** | |
 
 ### Headcount Formula
 
@@ -554,12 +559,12 @@ Required FTEs (per discipline) = Discipline person-days / (Project calendar days
 
 | Discipline | Days | FTEs needed | Round up |
 |---|---|---|---|
-| DevOps | 82 | 82 / 84 = 0.98 | **1** |
+| DevOps | 96 | 96 / 84 = 1.14 | **2** |
 | Backend | 279 | 279 / 84 = 3.32 | **4** |
 | Database | 62 | 62 / 84 = 0.74 | **1** (can overlap with Backend) |
 | Frontend / Design | 114 | 114 / 84 = 1.36 | **2** (1 designer-leaning + 1 dev-leaning, or 2 devs + contracted design) |
 | QA | 48 | 48 / 84 = 0.57 | **1** |
-| **Team total** | **585** | **6.97** | **~7–8 people** for a 6-month MVP |
+| **Team total** | **599** | **7.13** | **~8 people** for a 6-month MVP |
 
 > Adjust the calendar days and focus factor to your actual schedule to recompute the FTE requirement.
 
