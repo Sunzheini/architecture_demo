@@ -76,7 +76,10 @@ In addition to the project DoD above:
 | INFRA-24 | Provision **Pact Broker** as a self-hosted Container App (Postgres-backed) — required by CONT-07 contract tests | `modules/pact-broker/`; Pact Broker URL in Key Vault | INFRA-03, INFRA-05 | 2 |
 | INFRA-25 | Configure **GitHub Packages** auth: org-level federated identity for CI; PAT for local dev; documented `pip` and `npm` install setup; secret distributed to all service repos | `docs/runbooks/github-packages.md`; `GH_PACKAGES_TOKEN` secret in every repo | INFRA-15 | 2 |
 | INFRA-26 | Provision **Azure Defender for Storage** (malware scanning on Blob uploads) — backend for BE-L-11 virus scan | `modules/defender-storage/`; Defender enabled on file-upload storage account | INFRA-12 | 1 |
-| **Group total** | | | | **53** |
+| INFRA-29 | Author Django **migration ACA Job** (separate Container App Job, not the web container's startup) wired into the `erp-django-core` deploy pipeline as a **pre-traffic** step; `python manage.py migrate --check` runs as a dry-run on every PR; job blocks the new revision from receiving traffic on failure | `modules/aca-job-migrate/`; `.github/workflows/migrate-job.yml` reusable step | INFRA-03, DB-22 | 2 |
+| INFRA-30 | Switch all FastAPI + Django ACA apps to **multi-revision mode with traffic splitting** (canary 10% → 100%); add automated **post-deploy smoke probe** (`/health`, `/ready`, 1 representative API call) and **auto-rollback** (shift traffic back to previous revision) into `.github/workflows/deploy-template.yml`; rollback SLO ≤ 2 min | Updated `deploy-template.yml`; ACA app config in Terraform sets `revisionMode = "multiple"` | INFRA-03, INFRA-14 | 3 |
+| INFRA-32 | Add **release-please** (or conventional-commits + changelog automation) to all 18 repos for automatic version bumps + per-release changelogs; configure GitHub Environment **deployment freeze windows** (e.g. no Friday-afternoon prod deploys) | `.github/workflows/release-please.yml` shipped to every repo; freeze policy in GitHub Environment protection rules | INFRA-15 | 2 |
+| **Group total** | | | | **60** |
 
 ---
 
@@ -432,7 +435,8 @@ In addition to the project DoD above:
 | PROD-07 | Write runbooks: restore from backup, service rollback, incident response | `docs/runbooks/` | PROD-06 | 3 |
 | PROD-08 | Write per-service README and API docs (FastAPI OpenAPI auto-generated) | `README.md` per repo; Swagger UI accessible at `/docs` | All services | 3 |
 | PROD-09 | Author + maintain Acceptance Criteria appendix for remaining ~130 tasks (highest-risk 20 are pre-seeded — see appendix); enforce DoD checklist via PR template | Updated *Acceptance Criteria Appendix* in `Tasks.md`; `.github/PULL_REQUEST_TEMPLATE.md` shipped to every repo with the DoD checklist | All phases | 5 |
-| **Group total** | | | | **20** |
+| INFRA-31 | Write **expand → migrate → contract** schema-evolution runbook + **migration rollback** runbook (forward-only by default; emergency PITR from DB-20 + redeploy previous image SHA from PROD-04); verify both via a staging "game day" | `docs/runbooks/db-migrations.md`, `docs/runbooks/release-rollback.md` | INFRA-29, INFRA-30, DB-20, PROD-04 | 2 |
+| **Group total** | | | | **22** |
 
 ---
 
@@ -503,7 +507,7 @@ In addition to the project DoD above:
 
 | Phase / Group | Est. (person-days) |
 |---|---|
-| Phase 0 — Infrastructure & DevOps | 53 |
+| Phase 0 — Infrastructure & DevOps | 60 |
 | Phase 1a — `erp-core` package | 54 |
 | Phase 1a — `erp-contracts` package | 23 |
 | Phase 1b — Data Layer (Django) | 62 |
@@ -523,19 +527,19 @@ In addition to the project DoD above:
 | Phase 4 — Marketing Frontend | 22 |
 | Phase 4 — Accounting Frontend | 25 |
 | Phase 5 — Integration, QA & Testing | 48 |
-| Phase 6 — Production Readiness | 20 |
-| **Grand Total** | **576 person-days** |
+| Phase 6 — Production Readiness | 22 |
+| **Grand Total** | **585 person-days** |
 
 ### Effort by Discipline
 
 | Discipline | Est. (person-days) | Groups |
 |---|---|---|
-| **DevOps** | 53 + 20 = **73** | Phase 0, Phase 6 |
+| **DevOps** | 60 + 22 = **82** | Phase 0, Phase 6 |
 | **Backend (shared + services + AI)** | 54 + 23 + 31 + 29 + 43 + 7 + 12 + 18 + 15 + 21 + 10 + 16 = **279** | Phase 1a, Phase 2, Phase 3 |
 | **Database (Django data layer)** | **62** | Phase 1b |
 | **Frontend / Design** | 10 + 35 + 22 + 22 + 25 = **114** | Phase 4 |
 | **QA** | **48** | Phase 5 |
-| **Total** | **576** | |
+| **Total** | **585** | |
 
 ### Headcount Formula
 
@@ -550,12 +554,12 @@ Required FTEs (per discipline) = Discipline person-days / (Project calendar days
 
 | Discipline | Days | FTEs needed | Round up |
 |---|---|---|---|
-| DevOps | 73 | 73 / 84 = 0.87 | **1** |
+| DevOps | 82 | 82 / 84 = 0.98 | **1** |
 | Backend | 279 | 279 / 84 = 3.32 | **4** |
 | Database | 62 | 62 / 84 = 0.74 | **1** (can overlap with Backend) |
 | Frontend / Design | 114 | 114 / 84 = 1.36 | **2** (1 designer-leaning + 1 dev-leaning, or 2 devs + contracted design) |
 | QA | 48 | 48 / 84 = 0.57 | **1** |
-| **Team total** | **576** | **6.86** | **~7–8 people** for a 6-month MVP |
+| **Team total** | **585** | **6.97** | **~7–8 people** for a 6-month MVP |
 
 > Adjust the calendar days and focus factor to your actual schedule to recompute the FTE requirement.
 

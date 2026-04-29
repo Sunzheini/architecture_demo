@@ -322,6 +322,24 @@ push to main
 2. On version tag (e.g. `v1.2.0`) → build wheel → publish to **GitHub Packages** (private PyPI).
 3. Each service repo pins a specific version in its `pyproject.toml` — a Dependabot PR is auto-raised in all dependent repos when a new version is published.
 
+#### Release & Rollback Strategy (ACA revisions)
+
+Every Container App runs in **multi-revision mode** with traffic splitting. A deploy never replaces the running revision in place; it ships a new revision next to the old one and shifts traffic gradually.
+
+**Per-deploy flow (codified in the reusable workflow — INFRA-30):**
+1. Build + push image to ACR with tag `<sha>`.
+2. `az containerapp revision copy` creates a new revision receiving **0%** traffic.
+3. Automated **smoke probe** runs against the new revision's revision-specific FQDN: `/health`, `/ready`, and one representative API call. Fail = abort, no traffic shifted.
+4. Shift **10%** of traffic to the new revision (canary). Monitor error rate + latency for a configurable window (default 5 min).
+5. Shift to **100%**; mark old revision inactive (kept for fast rollback).
+6. **Auto-rollback** on smoke-probe failure or alert breach during the canary window: traffic is shifted back to the previous revision in ≤ **2 min** (rollback SLO).
+
+**Database migrations** run as a separate **ACA Job** (INFRA-29), not inside the web container's startup. The job runs **before** the new revision receives traffic. Migrations are forward-only by default; breaking schema changes follow the **expand → migrate → contract** pattern documented in `docs/runbooks/db-migrations.md` (INFRA-31). Emergency rollback path: point-in-time restore from DB-20 + redeploy the previous image SHA from `infra/image-versions/<env>/` (PROD-04).
+
+**Release governance:**
+- Every repo uses **release-please** (or conventional-commits) for automatic version bumps and per-release changelogs (INFRA-32).
+- Prod deploys honour a **deployment freeze window** policy enforced via GitHub Environment protection rules (e.g. no Friday-afternoon prod deploys).
+
 ### 13. Monitoring & Logging
 - **Metrics & Dashboards:** Azure Monitor + Container Apps built-in metrics (CPU, memory, replica count, request latency) fed into **Grafana** via Azure Monitor data source.
 - **Logging:** All container stdout/stderr streams automatically collected by Azure Container Apps into **Azure Monitor Log Analytics** — no log agent setup needed.
