@@ -374,32 +374,6 @@
 
 ---
 
-## Removed / Not Applicable Tasks (from original xlsx)
-
-The following tasks from the original Excel file were **removed** because they conflict with the architecture defined in `architecture_specifics.md`:
-
-| Original ID | Reason Removed |
-|-------------|----------------|
-| (orig) DB-02 / DB-03 | Multi-tenant master/template schema — architecture uses single DB with per-module schemas |
-| (orig) DB-04 | `create_tenant()` function — no multi-tenancy |
-| (orig) DB-20 | `migrate_tenants.py` runner — no multi-tenancy |
-| (orig) DJ-02 | Multi-DB routing per tenant — not applicable |
-| (orig) DJ-03 | `TenantUser` model — no tenant concept |
-| (orig) DJ-04 / DJ-09 | Local JWT provider + local refresh — replaced by Azure Entra ID (zero password/token code written by team) |
-| (orig) DJ-08 / DJ-13 | Tenant provisioning API + tenant module activation — no multi-tenancy |
-| (orig) DJ-15 | Master admin React dashboard — not in scope |
-| (orig) BE-INT-02 | Nginx reverse proxy as API Gateway — replaced by Azure API Management |
-| (orig) BE-INT-03 | JWT validation in FastAPI services — handled by APIM; FastAPI is auth-free |
-| (orig) DB-11 | `consulting` schema — renamed to `legal` to match architecture modules |
-| (orig) DB-12 / DB-13 | `contracts` / `projects` schemas under consulting — merged into `legal` module |
-| (orig) FE-02 / FE-03 | Vite + monorepo — architecture is Polyrepo with Webpack Module Federation |
-| (orig) FE-11 | `consulting-ui` remote — modules are Legal, Marketing, Accounting only |
-| (orig) FE-12 | `law-ui` — merged into `erp-legal-frontend` |
-| (orig) BE-03 | `ConfigLoader (YAML + env)` — replaced by `erp_core/config.py` with Pydantic BaseSettings + Azure Key Vault |
-| (orig) DB-17 / DB-18 | `hr` / `platform` schema tables — out of scope for current architecture |
-
----
-
 ## Effort Summary & Headcount Calculation
 
 | Phase / Group | Est. (person-days) |
