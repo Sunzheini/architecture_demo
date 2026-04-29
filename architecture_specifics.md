@@ -143,6 +143,8 @@ All AI workloads run as **separate, independently deployable Container Apps**, e
 - Aggregates results and returns them to the requesting service.
 - Scales to zero when no tasks are queued.
 
+> **Streaming results back to the UI:** AI agents (in particular the Generation Agent) publish **chunked** results to the `ai.results` topic, each chunk tagged with the originating `correlation_id` and a monotonically increasing `sequence_number`. The **FastAPI module services** own the public-facing SSE endpoints (`GET /api/<module>/ai/generation/stream/{correlation_id}`); they bridge `ai.results` → SSE via the Redis Pub/Sub fan-out helper in `erp_core/streaming/sse.py`. AI agents themselves remain **internal-only and HTTP-free** — no agent serves browser traffic.
+
 #### 8.2 AI Agent Services
 | Service | Container | Responsibility |
 |---------|-----------|---------------|
@@ -180,7 +182,7 @@ All AI workloads run as **separate, independently deployable Container Apps**, e
 | `ai.generation.requests` | Orchestrator | Generation Agent |
 | `ai.classification.requests` | Orchestrator | Classification Agent |
 | `ai.search.requests` | FastAPI module services | Search Agent |
-| `ai.results` | All AI agents | Orchestrator (aggregates results) |
+| `ai.results` | All AI agents | Orchestrator (aggregates results) **and** FastAPI module services (SSE bridge — subscribers filter by `correlation_id`; messages carry chunked `AIResultChunk` payloads with `sequence_number` for streamed UI delivery) |
 | `module.events` | All FastAPI services | Cross-module subscribers |
 
 ### 10. Caching & Load Balancing
@@ -210,7 +212,7 @@ CPU and memory consumed per second, with native scale-to-zero.
 | **AI Orchestrator** | `acr/ai-orchestrator` | 0 | 3 | Internal only | LangGraph Supervisor; routes tasks to AI agents; scales to zero when idle |
 | **AI — Ingestion Agent** | `acr/ai-ingestion` | 0 | 5 | Internal only | File parsing, chunking, embedding; scales to zero when queue empty |
 | **AI — Analysis Agent** | `acr/ai-analysis` | 0 | 5 | Internal only | GPT-4o powered analysis; scales to zero when queue empty |
-| **AI — Generation Agent** | `acr/ai-generation` | 0 | 5 | Internal only | GPT-4o powered content generation; scales to zero when queue empty |
+| **AI — Generation Agent** | `acr/ai-generation` | 0 | 5 | Internal only | GPT-4o powered content generation; **publishes streamed chunks to `ai.results`** (consumed by module APIs for SSE delivery — agent itself has no HTTP ingress); scales to zero when queue empty |
 | **AI — Classification Agent** | `acr/ai-classification` | 0 | 8 | Internal only | GPT-4o-mini triage/routing; cheapest agent, scales aggressively |
 | **AI — Search Agent** | `acr/ai-search` | 0 | 5 | Internal only | Vector + keyword search across all modules; scales to zero when idle |
 | **Celery Worker** | `acr/celery-worker` | 0 | 8 | None (no ingress) | Background tasks; scales to zero when queue empty |
@@ -329,6 +331,7 @@ push to main
 - **Integration Tests:** Per-service API tests using pytest + httpx.
 - **End-to-End Tests:** Playwright (covers full micro-frontend flows).
 - **AI Agent Tests:** LangSmith for tracing and evaluating AI agent outputs.
+- **Definition of Done:** every task in [`Tasks.md`](Tasks.md) inherits a project-wide Definition of Done (10 items: AC met, PR merged, ≥80% coverage, contract tests pass, type-checks/linters pass, structured logging, docs updated, observability wired, deployed to dev). A stricter **Production Definition of Done** (E2E green on staging, load test passed, OWASP ZAP + AI red-teaming clean, runbook verified, product-owner sign-off, image SHA pinned) gates every prod release. See `Tasks.md` for the full checklist and per-task acceptance criteria.
 
 ### 15. Security
 - GDPR compliance: PII tagging in data models, soft-delete + anonymization, audit log tables per schema, Azure region data residency.

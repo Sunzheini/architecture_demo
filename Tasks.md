@@ -11,6 +11,35 @@
 - **Est. (days)** = estimated effort in **person-days** (one engineer, focused work). Use it to derive headcount:
   `Required FTEs ≈ (Group total days) / (Calendar working days available × focus factor 0.7)`.
 - **Group totals** are listed at the bottom of each table; the **grand total** is at the end of the document.
+- **Definition of Done** (below) applies to **every task** in this document. Per-task **Acceptance Criteria** for the highest-risk tasks are listed in the *Acceptance Criteria Appendix* at the bottom.
+
+---
+
+## Definition of Done (applies to every task)
+
+A task may only be marked complete when **all** of the following are true:
+
+1. All acceptance criteria for the task are met (see per-task AC in the appendix; if no AC is listed, the task's *Deliverable* column is the implicit AC).
+2. Code merged to `main` via PR with at least 1 reviewer approval; CI is green.
+3. Unit tests added/updated; service-wide coverage ≥ **80%** (≥ **90%** for `erp-core` and `erp-contracts`).
+4. Integration tests added/updated where the task touches an external boundary (DB, Service Bus, HTTP, AI API).
+5. API contracts in `erp-contracts` updated if request/response shapes changed; Pact contract tests pass.
+6. Type checks pass (`mypy --strict` for backend, `tsc --noEmit` for frontend); linters pass (`ruff`, `eslint`).
+7. Structured logging added at INFO/ERROR boundaries with `correlation_id`; no `print()` or naked `logging.info`.
+8. Docs updated: relevant section of `architecture_specifics.md`, service `README.md`, and OpenAPI / Swagger schema.
+9. Observability: new metrics or alerts wired into Azure Monitor / Application Insights if the task introduces user-visible behaviour or scaling-relevant code paths.
+10. Deployed to **dev** environment via the standard CI/CD pipeline; smoke-checked manually or by automated probe.
+
+### Production Definition of Done (additional gate for Phase 6 / prod release)
+
+In addition to the project DoD above:
+
+1. Deployed to **staging**; full Playwright E2E suite green.
+2. Load test (k6 / Locust) passed at the configured autoscaling threshold.
+3. Security gates green: OWASP ZAP scan clean **and** AI red-teaming suite (QA-14) clean.
+4. Runbook updated: rollback procedure verified for the changed service.
+5. Product owner sign-off recorded in the GitHub Environment approval.
+6. Image SHA pinned in `infra/image-versions/<env>/` (PROD-04).
 
 ---
 
@@ -77,7 +106,8 @@
 | CORE-17 | Implement **transactional outbox pattern** in `erp_core/messaging`: producers write events to an `outbox` table inside the same DB transaction as their domain write; a relay process drains the outbox to Service Bus with at-least-once delivery. Required by every BE-*-publishes-event task. | `erp_core/messaging/outbox.py`; outbox table migration shipped in Django (DB-XX); relay worker mode in `erp_core.messaging` | CORE-07, DB-16 | 5 |
 | CORE-18 | Implement **PII redaction layer** in `erp_core/ai/pii_redactor.py` using **Microsoft Presidio**: strips/masks PII (names, emails, phones, IBANs, EGN/Bulstat) from any text before it is sent to Azure OpenAI. All AI agents and the Generation/Analysis prompt-builders must call it. | `erp_core/ai/pii_redactor.py`; Presidio recognizer config for EN + BG; unit tests with sample legal/financial PII | CORE-01 | 4 |
 | CORE-19 | Implement **prompt-injection guardrails** in `erp_core/ai/prompt_guard.py`: input sanitization (strip system-prompt overrides), output validation against expected Pydantic schema, jailbreak-pattern detection, max-length and token caps | `erp_core/ai/prompt_guard.py`; jailbreak pattern library; unit tests | CORE-01 | 3 |
-| **Group total** | | | | **49** |
+| CORE-20 | Implement **SSE fan-out helper** in `erp_core/streaming/sse.py`: per-`correlation_id` channels backed by **Redis Pub/Sub** so any replica of a module API can deliver chunks to the open SSE connection regardless of which replica subscribed to `ai.results` first. Includes heartbeat, client-disconnect detection, and back-pressure. Used by all module APIs for streamed AI output. | `erp_core/streaming/sse.py`; Redis Pub/Sub channel naming convention; integration test with 2 replicas + 1 producer | CORE-01, INFRA-06 | 3 |
+| **Group total** | | | | **52** |
 
 ### `erp-contracts` Pydantic Package
 > Area: **Backend** | Repo: `erp-contracts`
@@ -150,7 +180,8 @@
 | BE-L-10 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | BE-L-01, INFRA-14 | 2 |
 | BE-L-11 | Implement **virus / malware scan** on every uploaded document via Azure Defender for Storage (blocking — file is quarantined and rejected if Defender flags it) before publishing to `ai.ingestion.requests` | `services/upload_scanner.py`; Defender event-grid subscription | BE-L-01, INFRA-26 | 2 |
 | BE-L-12 | Implement **upload validation**: max file-size limit (configurable per env), magic-byte content-type validation (reject executables disguised as PDFs/DOCX), filename sanitization | `services/upload_validator.py` | BE-L-01 | 1 |
-| **Group total** | | | | **29** |
+| BE-L-13 | Implement **AI streaming SSE endpoint** `GET /api/legal/ai/generation/stream/{correlation_id}` (Content-Type `text/event-stream`): publishes the generation request to `ai.generation.requests` via the outbox, then holds the SSE connection open and pushes chunks delivered by `CORE-20`'s Redis Pub/Sub fan-out as the Generation Agent emits them. Replaces the previously planned in-agent SSE endpoint. | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` (Service Bus → Redis Pub/Sub bridge) | BE-L-01, CORE-15, CORE-20, INFRA-07 | 2 |
+| **Group total** | | | | **31** |
 
 ### Marketing FastAPI Service
 > Area: **Backend** | Repo: `erp-marketing-api`
@@ -166,7 +197,8 @@
 | BE-M-07 | Implement ETL data import (bulk lead/campaign import) | `services/etl_service.py` | BE-M-01 | 4 |
 | BE-M-08 | Write unit + integration tests | `tests/` (≥80% coverage) | BE-M-01–BE-M-07 | 5 |
 | BE-M-09 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | BE-M-01, INFRA-14 | 2 |
-| **Group total** | | | | **27** |
+| BE-M-10 | Implement **AI streaming SSE endpoint** `GET /api/marketing/ai/generation/stream/{correlation_id}` — same pattern as BE-L-13 (publishes to `ai.generation.requests` via outbox; bridges `ai.results` to SSE via CORE-20) | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` | BE-M-01, CORE-15, CORE-20, INFRA-07 | 2 |
+| **Group total** | | | | **29** |
 
 ### Accounting FastAPI Service
 > Area: **Backend** | Repo: `erp-accounting-api`
@@ -186,7 +218,8 @@
 | BE-A-11 | Trigger AI generation for financial narratives → `ai.generation.requests` | Service Bus publisher in `services/narrative_service.py` | BE-A-01, CORE-07 | 3 |
 | BE-A-12 | Write unit + integration tests | `tests/` (≥80% coverage) | BE-A-01–BE-A-11 | 5 |
 | BE-A-13 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | BE-A-01, INFRA-14 | 2 |
-| **Group total** | | | | **41** |
+| BE-A-14 | Implement **AI streaming SSE endpoint** `GET /api/accounting/ai/generation/stream/{correlation_id}` — same pattern as BE-L-13 (publishes to `ai.generation.requests` via outbox; bridges `ai.results` to SSE via CORE-20) | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` | BE-A-01, CORE-15, CORE-20, INFRA-07 | 2 |
+| **Group total** | | | | **43** |
 
 ### Celery Background Worker
 > Area: **Backend** | Repo: `erp-celery-worker`
@@ -253,10 +286,9 @@
 | AI-GEN-04 | Implement financial narrative generation (GPT-4o) | `generators/financial_narrative.py` | AI-GEN-01, INFRA-13 | 3 |
 | AI-GEN-05 | Implement email draft generation (GPT-4o) | `generators/email_draft.py` | AI-GEN-01, INFRA-13 | 3 |
 | AI-GEN-06 | Create and manage prompt templates (per persona / use case) | `data/prompts/` (≥10 prompt templates covering all modules) | AI-GEN-01 | 4 |
-| AI-GEN-07 | Subscribe to `ai.generation.requests`; publish to `ai.results` | `consumers/generation_consumer.py` | AI-GEN-01, CORE-07 | 2 |
-| AI-GEN-08 | Implement AG-UI (SSE streaming for real-time agent output in UI) | `agui/emitter.py`; SSE endpoint | AI-GEN-01 | 3 |
-| AI-GEN-09 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | AI-GEN-01, INFRA-14 | 1 |
-| **Group total** | | | | **23** |
+| AI-GEN-07 | Subscribe to `ai.generation.requests`; publish **streamed chunks** to `ai.results` topic with `correlation_id` and monotonically increasing `sequence_number` (consumed by module APIs' SSE fan-out via CORE-20) | `consumers/generation_consumer.py`; chunked `AIResultChunk` Pydantic schema in `erp-contracts` | AI-GEN-01, CORE-07 | 3 |
+| AI-GEN-08 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | AI-GEN-01, INFRA-14 | 1 |
+| **Group total** | | | | **21** |
 
 ### AI Classification Agent
 > Area: **Backend** | Repo: `erp-ai-classification`
@@ -326,7 +358,7 @@
 | FE-L-02 | Implement Legal Dossier list + detail pages | `src/pages/Dossiers/` | FE-L-01, BE-L-02 | 4 |
 | FE-L-03 | Implement Legal Case management UI | `src/pages/Cases/` | FE-L-01, BE-L-03 | 4 |
 | FE-L-04 | Implement Legal Deadline calendar / tracker UI | `src/pages/Deadlines/` | FE-L-01, BE-L-04 | 3 |
-| FE-L-05 | Implement Law Acts / Knowledge Base search UI with AI chat (SSE streaming) | `src/pages/Search/`; SSE integration with AI generation agent | FE-L-01, BE-L-07, AI-GEN-08 | 5 |
+| FE-L-05 | Implement Law Acts / Knowledge Base search UI with AI chat (SSE streaming) | `src/pages/Search/`; SSE integration with the Legal FastAPI streaming endpoint (`GET /api/legal/ai/generation/stream/{correlation_id}`) | FE-L-01, BE-L-07, BE-L-13 | 5 |
 | FE-L-06 | Implement document upload UI (triggers ingestion pipeline) | `src/components/DocumentUpload.tsx` | FE-L-01, BE-L-06 | 3 |
 | FE-L-07 | Write Nginx config + Dockerfile + GitHub Actions CI/CD | `nginx.conf`, `Dockerfile`, `.github/workflows/ci-cd.yml` | FE-L-01, INFRA-14 | 2 |
 | **Group total** | | | | **22** |
@@ -375,7 +407,7 @@
 | QA-06 | Validate APIM JWT rejection of invalid/expired tokens | Postman/pytest test collection against APIM | INFRA-09, BE-L-01 | 2 |
 | QA-07 | Validate RBAC: roles block correct endpoints across all modules | Role-based test matrix | INFRA-11, QA-06 | 3 |
 | QA-08 | Load test FastAPI services (10+ concurrent requests, autoscaling validation) | k6 / Locust load test report | All BE services | 4 |
-| QA-09 | AI agent integration test — full ingestion → analysis → generation pipeline | `tests/ai_pipeline_integration.py` | AI-ING-01–AI-GEN-09 | 5 |
+| QA-09 | AI agent integration test — full ingestion → analysis → generation pipeline | `tests/ai_pipeline_integration.py` | AI-ING-01–AI-GEN-08 | 5 |
 | QA-10 | LangSmith evaluation — AI output quality for all agent types | LangSmith evaluation dataset + scores | AI-01–AI-SRC-07 | 3 |
 | QA-11 | Security scan: OWASP ZAP against all public endpoints | ZAP scan report; fix identified issues | All BE + FE | 3 |
 | QA-12 | Accessibility audit (WCAG 2.1 AA) on all frontend modules | Lighthouse / axe-core report; fix critical issues | All FE | 3 |
@@ -398,7 +430,65 @@
 | PROD-06 | Production go-live deployment (manual approval gate in GitHub Environments) | All services live in prod ACA environment | PROD-05 | 1 |
 | PROD-07 | Write runbooks: restore from backup, service rollback, incident response | `docs/runbooks/` | PROD-06 | 3 |
 | PROD-08 | Write per-service README and API docs (FastAPI OpenAPI auto-generated) | `README.md` per repo; Swagger UI accessible at `/docs` | All services | 3 |
-| **Group total** | | | | **15** |
+| PROD-09 | Author + maintain Acceptance Criteria appendix for remaining ~130 tasks (highest-risk 20 are pre-seeded — see appendix); enforce DoD checklist via PR template | Updated *Acceptance Criteria Appendix* in `Tasks.md`; `.github/PULL_REQUEST_TEMPLATE.md` shipped to every repo with the DoD checklist | All phases | 5 |
+| **Group total** | | | | **20** |
+
+---
+
+## Acceptance Criteria Appendix (highest-risk tasks)
+
+> **How to read this appendix:** Each entry below adds **specific** acceptance criteria on top of the project-wide Definition of Done. If a task is not listed here, its *Deliverable* column in the main tables is the implicit acceptance criterion. Remaining tasks will be filled in under **PROD-09** by the responsible task owner before work starts.
+
+### Phase 0 — Infrastructure (security-critical)
+
+| Task | Acceptance Criteria |
+|---|---|
+| **INFRA-09** APIM | • APIM JWT validation rejects expired and invalid-signature tokens with HTTP 401 (verified by automated pytest against the live dev APIM instance).<br>• Per-route rate limit is configurable via a Terraform variable; default 100 req/min/user.<br>• Routing rules cover Legal, Marketing, Accounting APIs and the Django internal API; **deny-by-default** for any other path.<br>• Forwarded claim headers (`x-user-id`, `x-user-roles`) are present on every upstream request. |
+| **INFRA-11** Entra ID | • App registration created with the role list defined in DB-14 (`legal.reader`, `legal.editor`, `marketing.admin`, `accounting.editor`, etc.).<br>• MFA enforced via Conditional Access for any role ending in `.admin` or `.editor`.<br>• Token TTL ≤ 60 min, refresh TTL ≤ 8 h.<br>• Test user accounts seeded per environment. |
+| **INFRA-26** Defender for Storage | • Defender enabled on the upload storage account in dev, staging, prod.<br>• Defender event-grid topic emits `Microsoft.Security.MalwareScanningResult` events.<br>• Cost alert configured at $5/day per env. |
+
+### Phase 1a — `erp-core` (foundational + AI safety)
+
+| Task | Acceptance Criteria |
+|---|---|
+| **CORE-14** Django client | • Client is regenerated automatically when the Django OpenAPI schema changes (CI fails if the committed client is stale).<br>• All requests include managed-identity bearer token.<br>• Retries: exponential backoff with max 3 attempts on 5xx and network errors; never retries on 4xx.<br>• Implements `BaseRepository` for at least one resource and passes the shared repository contract test. |
+| **CORE-16** DLQ + idempotency | • Poison message moved to DLQ after **5** delivery attempts (configurable).<br>• Idempotency cache TTL = 24 h, keyed by `MessageId` in Redis.<br>• Re-delivery of the same `MessageId` is a no-op — verified by integration test that publishes the same message twice and asserts a single side-effect.<br>• DLQ depth exposed as a metric to Azure Monitor. |
+| **CORE-17** Transactional outbox | • Outbox row insert and domain write are in the same DB transaction (verified by failure-injection test that aborts after the domain write — no Service Bus message is published).<br>• Relay process drains outbox in FIFO order with ≤ 5 s p99 lag under steady load.<br>• Outbox table TTL: rows older than 7 days and marked sent are pruned daily. |
+| **CORE-18** PII redactor | • Detects and masks: BG **EGN**, **IBAN**, email, phone, person names (EN+BG), BG addresses.<br>• Achieves ≥ **95% recall** on a labelled 50-text PII corpus committed to the repo.<br>• Adds < **30 ms** latency for inputs up to 4 KB (benchmark in CI).<br>• Public API: `redact(text: str) -> RedactedText` and `is_safe(text: str) -> bool`.<br>• **Hard rule:** any call to Azure OpenAI not preceded by `redact()` fails CI's static-analysis check. |
+| **CORE-19** Prompt-injection guardrails | • Strips known system-prompt-override patterns (`"ignore previous instructions"`, jailbreak corpus from the OWASP LLM Top 10).<br>• Validates LLM output against the expected Pydantic schema; non-conforming output triggers a single retry then raises `PromptGuardError`.<br>• Token cap enforced per request (configurable; default 8 K input / 2 K output).<br>• Test corpus of 30 known jailbreak attempts: ≥ **90% blocked**. |
+
+### Phase 1b — Data Layer
+
+| Task | Acceptance Criteria |
+|---|---|
+| **DB-16** Django internal REST API | • Endpoints follow `/internal/v1/<schema>/<resource>` pattern; OpenAPI schema is the source of truth.<br>• All endpoints require service-to-service auth (DB-24).<br>• Response shapes match the Pydantic models in `erp-contracts` (validated by Pact).<br>• p95 latency < **100 ms** for single-record reads against a 1M-row table on the dev DB. |
+| **DB-20** Backup / restore validation | • Point-in-time restore from a 24-h-old backup completes in < 30 min on a staging-sized DB.<br>• Restored DB passes a row-count + checksum diff against the source.<br>• Geo-redundant backup verified in a secondary Azure region.<br>• Runbook (`docs/runbooks/restore.md`) walks through the exact `az postgres flexible-server restore` command and includes screenshots. |
+| **DB-24** Service-to-service auth | • Only Container Apps with role `internal-api-caller` can call the Django internal API; all others return HTTP 403.<br>• Tokens validated against Entra ID's public keys; no shared secrets.<br>• Token caching in Redis with TTL = token expiry minus 60 s.<br>• Audit log entry written for every internal API call. |
+| **DB-25** Schema drift contract test | • CI job spins up a fresh Django container, runs migrations, then runs every FastAPI service's integration test suite against it.<br>• Job fails (and PR is blocked) if any FastAPI integration test fails due to schema mismatch.<br>• Job runs in < 10 min total. |
+
+### Phase 2 — Module APIs (business-correctness-critical)
+
+| Task | Acceptance Criteria |
+|---|---|
+| **BE-A-04** Double-entry validation | • Debit total must equal credit total within **0.01 BGN** tolerance.<br>• Unbalanced entries return HTTP **422** with body `{"errors": [{"line": <n>, "delta": <amount>}, ...]}`.<br>• Validation runs in < **50 ms** for entries with ≤ 100 lines.<br>• Pure function — no DB writes; called from `routes/journal_entries.py` before persistence.<br>• ≥ 20 test cases covering: balanced, off-by-0.01, off-by-large, single line, empty, negative amounts. |
+| **BE-A-06** Financial statements | • Balance Sheet, P&L, and Cash Flow generated for any closed period; numbers tie to the sum of underlying journal lines (verified by reconciliation test).<br>• Output formats: JSON (API) and PDF (download).<br>• Previous-period comparison column included.<br>• Generation completes in < 5 s for a year of data on the dev DB. |
+| **BE-A-07** VAT + corporate tax | • VAT declaration matches the official NAP XML schema (validated against the published XSD in CI).<br>• Corporate tax declaration covers Bulgarian standard rates current as of January 2026.<br>• Generated declaration is byte-identical when re-run on the same input (deterministic).<br>• Sample declarations from a known input set are committed and diffed in CI. |
+| **BE-L-11** Virus / malware scan | • Files flagged by Defender within **5 min** of upload are quarantined and the user is notified via the Notification Center.<br>• `ai.ingestion.requests` is **never** published until the Defender scan returns clean.<br>• Defender errors (timeout / unreachable) **fail closed**: file is rejected, not allowed through.<br>• Quarantined files retained for 30 days then auto-deleted. |
+| **BE-L-12** Upload validation | • Max file size: **50 MB** (configurable per env via Key Vault secret).<br>• Magic-byte check rejects executables (PE, ELF, Mach-O), scripts, and archives disguised as PDF/DOCX/XLSX.<br>• Filename sanitisation strips path separators and non-printable chars; preserves Unicode (Bulgarian filenames).<br>• Rejection returns HTTP **415** with a machine-readable error code. |
+
+### Phase 5 — QA
+
+| Task | Acceptance Criteria |
+|---|---|
+| **QA-14** AI red-teaming | • Suite covers all 5 AI agents.<br>• Includes the OWASP LLM Top 10 prompt-injection patterns + a custom corpus of 30 ERP-domain jailbreak attempts.<br>• Includes 50 PII-leak test cases (must produce zero PII in agent output).<br>• Runs weekly in CI as a scheduled GitHub Action; failure pages on-call.<br>• Results published to the LangSmith evaluation dashboard. |
+
+### Phase 6 — Production Readiness (the prod gate)
+
+| Task | Acceptance Criteria |
+|---|---|
+| **PROD-05** Staging smoke + sign-off | • Full Playwright E2E suite green on staging.<br>• Load test (k6) at the configured autoscale threshold passes with p95 latency < target SLO and zero 5xx.<br>• Security gates green: OWASP ZAP scan + QA-14 AI red-teaming suite both clean.<br>• Sign-off recorded in `docs/signoffs/<release-tag>.md` by product owner + tech lead. |
+| **PROD-06** Production go-live | • All Production DoD items (above) green.<br>• GitHub Environment manual approval recorded with reviewer name + timestamp.<br>• Smoke probe (`/health` + 1 representative API call per service) green within 5 min of deploy.<br>• Image SHAs committed to `infra/image-versions/prod/` (PROD-04). |
+| **PROD-07** Runbooks | • One runbook per scenario: restore-from-backup, service-rollback, AI-agent-failover, APIM-key-rotation, incident-response.<br>• Each runbook tested in a staging "game day" within 30 days of writing.<br>• Each runbook includes: pre-checks, exact commands, validation steps, escalation contacts. |
 
 ---
 
@@ -407,17 +497,17 @@
 | Phase / Group | Est. (person-days) |
 |---|---|
 | Phase 0 — Infrastructure & DevOps | 53 |
-| Phase 1a — `erp-core` package | 49 |
+| Phase 1a — `erp-core` package | 52 |
 | Phase 1a — `erp-contracts` package | 23 |
 | Phase 1b — Data Layer (Django) | 62 |
-| Phase 2 — Legal FastAPI | 29 |
-| Phase 2 — Marketing FastAPI | 27 |
-| Phase 2 — Accounting FastAPI | 41 |
+| Phase 2 — Legal FastAPI | 31 |
+| Phase 2 — Marketing FastAPI | 29 |
+| Phase 2 — Accounting FastAPI | 43 |
 | Phase 2 — Celery Worker | 7 |
 | Phase 3 — AI Orchestrator | 12 |
 | Phase 3 — AI Ingestion Agent | 18 |
 | Phase 3 — AI Analysis Agent | 15 |
-| Phase 3 — AI Generation Agent | 23 |
+| Phase 3 — AI Generation Agent | 21 |
 | Phase 3 — AI Classification Agent | 10 |
 | Phase 3 — AI Search Agent | 16 |
 | Phase 4 — Design (Figma) | 10 |
@@ -426,19 +516,19 @@
 | Phase 4 — Marketing Frontend | 22 |
 | Phase 4 — Accounting Frontend | 25 |
 | Phase 5 — Integration, QA & Testing | 48 |
-| Phase 6 — Production Readiness | 15 |
-| **Grand Total** | **562 person-days** |
+| Phase 6 — Production Readiness | 20 |
+| **Grand Total** | **574 person-days** |
 
 ### Effort by Discipline
 
 | Discipline | Est. (person-days) | Groups |
 |---|---|---|
-| **DevOps** | 53 + 15 = **68** | Phase 0, Phase 6 |
-| **Backend (shared + services + AI)** | 49 + 23 + 29 + 27 + 41 + 7 + 12 + 18 + 15 + 23 + 10 + 16 = **270** | Phase 1a, Phase 2, Phase 3 |
+| **DevOps** | 53 + 20 = **73** | Phase 0, Phase 6 |
+| **Backend (shared + services + AI)** | 52 + 23 + 31 + 29 + 43 + 7 + 12 + 18 + 15 + 21 + 10 + 16 = **277** | Phase 1a, Phase 2, Phase 3 |
 | **Database (Django data layer)** | **62** | Phase 1b |
 | **Frontend / Design** | 10 + 35 + 22 + 22 + 25 = **114** | Phase 4 |
 | **QA** | **48** | Phase 5 |
-| **Total** | **562** | |
+| **Total** | **574** | |
 
 ### Headcount Formula
 
@@ -453,12 +543,12 @@ Required FTEs (per discipline) = Discipline person-days / (Project calendar days
 
 | Discipline | Days | FTEs needed | Round up |
 |---|---|---|---|
-| DevOps | 68 | 68 / 84 = 0.81 | **1** |
-| Backend | 270 | 270 / 84 = 3.21 | **4** |
+| DevOps | 73 | 73 / 84 = 0.87 | **1** |
+| Backend | 277 | 277 / 84 = 3.30 | **4** |
 | Database | 62 | 62 / 84 = 0.74 | **1** (can overlap with Backend) |
 | Frontend / Design | 114 | 114 / 84 = 1.36 | **2** (1 designer-leaning + 1 dev-leaning, or 2 devs + contracted design) |
 | QA | 48 | 48 / 84 = 0.57 | **1** |
-| **Team total** | **562** | **6.69** | **~7–8 people** for a 6-month MVP |
+| **Team total** | **574** | **6.84** | **~7–8 people** for a 6-month MVP |
 
 > Adjust the calendar days and focus factor to your actual schedule to recompute the FTE requirement.
 
