@@ -56,7 +56,7 @@ In addition to the project DoD above:
 | INFRA-04 | Extend ACA-environment module with staging / prod tfvars (config-only, same module) | Staging + prod ACA env definitions in `envs/{staging,prod}/` (apply happens in INFRA-21) | INFRA-03 | 2 |
 | INFRA-05 | Author Terraform module for Azure Database for PostgreSQL (Flexible Server) + apply to dev | `modules/postgresql/`; Multi-AZ enabled via tfvars in prod | INFRA-01 | 3 |
 | INFRA-06 | Author Terraform module for Azure Cache for Redis (clustered) + apply to dev | `modules/redis/`; Redis instance | INFRA-01 | 1 |
-| INFRA-07 | Author Terraform module for Azure Service Bus (queues + topics from architecture spec) + apply to dev | `modules/service-bus/`; namespace with all queues | INFRA-01 | 2 |
+| INFRA-07 | Author Terraform module for Azure Service Bus (queues + topics from architecture spec — note: `ai.search.requests` is **not** included; search is sync HTTP) + apply to dev | `modules/service-bus/`; namespace with all queues except search | INFRA-01 | 2 |
 | INFRA-08 | Author Terraform module for Azure Key Vault (one per environment) + apply to dev | `modules/key-vault/`; Key Vault instance | INFRA-01 | 1 |
 | INFRA-09 | Author Terraform module for Azure API Management + apply to dev (JWT validation policy, routing rules, VNet integration) | `modules/apim/`; APIM instance with policies as code | INFRA-01 | 4 |
 | INFRA-10 | Author Terraform module for Azure Front Door (CDN + WAF + TLS) + apply to dev | `modules/front-door/`; routing `/api/*` to APIM and static assets to frontend apps | INFRA-09 | 2 |
@@ -101,13 +101,14 @@ In addition to the project DoD above:
 | CORE-12 | Write unit tests for all `erp-core` modules (≥90% coverage) | `tests/` in `erp-core` repo | CORE-02–CORE-11 | 5 |
 | CORE-13 | Publish `erp-core` **v1.0.0** to GitHub Packages (without Django client — unblocks Django + FastAPI scaffolding) | GitHub Packages private PyPI entry | CORE-12, INFRA-25 | 1 |
 | CORE-14 | Implement `erp_core/clients/django_client.py` — typed async client for the Django internal REST API (auto-generated from Django's OpenAPI schema using `openapi-python-client`); wraps `erp_core/http_client.py` with managed-identity auth, retries, and `BaseRepository` interface compliance | `erp_core/clients/django_client.py`; CI step that regenerates the client when the Django OpenAPI schema changes | CORE-08, DB-17 | 3 |
-| CORE-15 | Publish `erp-core` **v1.1.0** to GitHub Packages (includes Django client, DLQ/idempotency, transactional outbox, PII redactor, prompt guard) — required by all FastAPI services and AI agents | GitHub Packages release | CORE-14, CORE-16, CORE-17, CORE-18, CORE-19 | 1 |
+| CORE-15 | Publish `erp-core` **v1.1.0** to GitHub Packages (includes Django client, DLQ/idempotency, transactional outbox, PII redactor, prompt guard, SSE fan-out, Search client) — required by all FastAPI services and AI agents | GitHub Packages release | CORE-14, CORE-16, CORE-17, CORE-18, CORE-19, CORE-20, CORE-21 | 1 |
 | CORE-16 | Implement **DLQ + idempotency** in `erp_core/messaging`: Service Bus subscribers automatically move poison messages to DLQ after N retries; consumers track processed message IDs in Redis to handle at-least-once redelivery | `erp_core/messaging/dlq.py`, `erp_core/messaging/idempotency.py`; integration tests with Azure Service Bus emulator | CORE-07 | 4 |
 | CORE-17 | Implement **transactional outbox pattern** in `erp_core/messaging`: producers write events to an `outbox` table inside the same DB transaction as their domain write; a relay process drains the outbox to Service Bus with at-least-once delivery. Required by every BE-*-publishes-event task. | `erp_core/messaging/outbox.py`; outbox table migration shipped in Django (DB-XX); relay worker mode in `erp_core.messaging` | CORE-07, DB-16 | 5 |
 | CORE-18 | Implement **PII redaction layer** in `erp_core/ai/pii_redactor.py` using **Microsoft Presidio**: strips/masks PII (names, emails, phones, IBANs, EGN/Bulstat) from any text before it is sent to Azure OpenAI. All AI agents and the Generation/Analysis prompt-builders must call it. | `erp_core/ai/pii_redactor.py`; Presidio recognizer config for EN + BG; unit tests with sample legal/financial PII | CORE-01 | 4 |
 | CORE-19 | Implement **prompt-injection guardrails** in `erp_core/ai/prompt_guard.py`: input sanitization (strip system-prompt overrides), output validation against expected Pydantic schema, jailbreak-pattern detection, max-length and token caps | `erp_core/ai/prompt_guard.py`; jailbreak pattern library; unit tests | CORE-01 | 3 |
 | CORE-20 | Implement **SSE fan-out helper** in `erp_core/streaming/sse.py`: per-`correlation_id` channels backed by **Redis Pub/Sub** so any replica of a module API can deliver chunks to the open SSE connection regardless of which replica subscribed to `ai.results` first. Includes heartbeat, client-disconnect detection, and back-pressure. Used by all module APIs for streamed AI output. | `erp_core/streaming/sse.py`; Redis Pub/Sub channel naming convention; integration test with 2 replicas + 1 producer | CORE-01, INFRA-06 | 3 |
-| **Group total** | | | | **52** |
+| CORE-21 | Implement typed **`SearchClient`** in `erp_core/clients/search_client.py` — sync HTTP wrapper around the AI Search Agent's `POST /search` endpoint. Wraps `erp_core.http_client` with retry, timeout, **circuit breaker**, and `correlation_id` propagation; exposes `search(query, filters) -> SearchResult` typed against the contract in `erp-contracts`. | `erp_core/clients/search_client.py`; integration test against a stubbed Search Agent | CORE-08 | 2 |
+| **Group total** | | | | **54** |
 
 ### `erp-contracts` Pydantic Package
 > Area: **Backend** | Repo: `erp-contracts`
@@ -174,7 +175,7 @@ In addition to the project DoD above:
 | BE-L-04 | Implement Legal Deadline tracking endpoints (via Django internal API) | `routes/deadlines.py` | BE-L-01, DB-16 | 2 |
 | BE-L-05 | Implement Law Acts / Knowledge Base endpoints (via Django internal API) | `routes/law_acts.py` | BE-L-01, DB-16 | 2 |
 | BE-L-06 | Implement document upload → trigger `ai.ingestion.requests` Service Bus message (only after virus scan + validation pass) | `routes/documents.py`; Service Bus publisher | BE-L-01, CORE-07, INFRA-07, BE-L-11, BE-L-12 | 3 |
-| BE-L-07 | Implement AI Search integration (publish to `ai.search.requests`, consume results) | `routes/search.py` | BE-L-01, CORE-07 | 3 |
+| BE-L-07 | Implement AI Search integration via **sync HTTP** call to the Search Agent (`erp_core.clients.SearchClient`) — no Service Bus involved | `routes/search.py` | BE-L-01, CORE-15 | 3 |
 | BE-L-08 | Implement audit logging for all write operations (via `erp-core` middleware) | Audit events in `core_audit_log` | BE-L-01, DB-06 | 2 |
 | BE-L-09 | Write unit + integration tests (pytest + httpx) | `tests/` (≥80% coverage) | BE-L-01–BE-L-08 | 5 |
 | BE-L-10 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | BE-L-01, INFRA-14 | 2 |
@@ -311,7 +312,7 @@ In addition to the project DoD above:
 | AI-SRC-02 | Implement vector similarity search (pgvector MVP) | `search/pgvector_search.py` | AI-SRC-01, DB-08 | 3 |
 | AI-SRC-03 | Implement hybrid search (vector + keyword) | `search/hybrid_search.py` | AI-SRC-02 | 4 |
 | AI-SRC-04 | Implement ranked, cited result response formatting | `search/result_formatter.py` | AI-SRC-02 | 2 |
-| AI-SRC-05 | Subscribe to `ai.search.requests`; publish to `ai.results` | `consumers/search_consumer.py` | AI-SRC-01, CORE-07 | 2 |
+| AI-SRC-05 | Expose `POST /search` HTTP endpoint (FastAPI + Uvicorn) with `erp-core` middleware, structured logging, and standard `/health` + `/ready` endpoints. **Sync request/response** — search is interactive and latency-sensitive; Service Bus is intentionally not used for this agent. | `routes/search.py`; `main.py` (FastAPI app factory) | AI-SRC-01, CORE-15 | 2 |
 | AI-SRC-06 | Implement token usage tracking + budget enforcement (Redis-backed) | `services/token_service.py` | AI-SRC-01, INFRA-06 | 3 |
 | AI-SRC-07 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | AI-SRC-01, INFRA-14 | 1 |
 | **Group total** | | | | **16** |
@@ -476,6 +477,12 @@ In addition to the project DoD above:
 | **BE-L-11** Virus / malware scan | • Files flagged by Defender within **5 min** of upload are quarantined and the user is notified via the Notification Center.<br>• `ai.ingestion.requests` is **never** published until the Defender scan returns clean.<br>• Defender errors (timeout / unreachable) **fail closed**: file is rejected, not allowed through.<br>• Quarantined files retained for 30 days then auto-deleted. |
 | **BE-L-12** Upload validation | • Max file size: **50 MB** (configurable per env via Key Vault secret).<br>• Magic-byte check rejects executables (PE, ELF, Mach-O), scripts, and archives disguised as PDF/DOCX/XLSX.<br>• Filename sanitisation strips path separators and non-printable chars; preserves Unicode (Bulgarian filenames).<br>• Rejection returns HTTP **415** with a machine-readable error code. |
 
+### Phase 3 — AI Search Agent (sync HTTP)
+
+| Task | Acceptance Criteria |
+|---|---|
+| **AI-SRC-05** HTTP `/search` endpoint | • Sync request/response — no Service Bus involvement.<br>• p95 latency ≤ **800 ms** for vector search over a 100 K-embedding corpus on the dev DB.<br>• Returns HTTP **503** within **5 s** if Azure OpenAI or pgvector is unreachable (fail-fast — circuit breaker on the caller side handles backoff).<br>• `correlation_id` header is propagated from request to response and into all downstream logs/traces.<br>• Min replicas = **1** (no cold starts); HTTP-driven autoscaling up to max = 5. |
+
 ### Phase 5 — QA
 
 | Task | Acceptance Criteria |
@@ -497,7 +504,7 @@ In addition to the project DoD above:
 | Phase / Group | Est. (person-days) |
 |---|---|
 | Phase 0 — Infrastructure & DevOps | 53 |
-| Phase 1a — `erp-core` package | 52 |
+| Phase 1a — `erp-core` package | 54 |
 | Phase 1a — `erp-contracts` package | 23 |
 | Phase 1b — Data Layer (Django) | 62 |
 | Phase 2 — Legal FastAPI | 31 |
@@ -517,18 +524,18 @@ In addition to the project DoD above:
 | Phase 4 — Accounting Frontend | 25 |
 | Phase 5 — Integration, QA & Testing | 48 |
 | Phase 6 — Production Readiness | 20 |
-| **Grand Total** | **574 person-days** |
+| **Grand Total** | **576 person-days** |
 
 ### Effort by Discipline
 
 | Discipline | Est. (person-days) | Groups |
 |---|---|---|
 | **DevOps** | 53 + 20 = **73** | Phase 0, Phase 6 |
-| **Backend (shared + services + AI)** | 52 + 23 + 31 + 29 + 43 + 7 + 12 + 18 + 15 + 21 + 10 + 16 = **277** | Phase 1a, Phase 2, Phase 3 |
+| **Backend (shared + services + AI)** | 54 + 23 + 31 + 29 + 43 + 7 + 12 + 18 + 15 + 21 + 10 + 16 = **279** | Phase 1a, Phase 2, Phase 3 |
 | **Database (Django data layer)** | **62** | Phase 1b |
 | **Frontend / Design** | 10 + 35 + 22 + 22 + 25 = **114** | Phase 4 |
 | **QA** | **48** | Phase 5 |
-| **Total** | **574** | |
+| **Total** | **576** | |
 
 ### Headcount Formula
 
@@ -544,11 +551,11 @@ Required FTEs (per discipline) = Discipline person-days / (Project calendar days
 | Discipline | Days | FTEs needed | Round up |
 |---|---|---|---|
 | DevOps | 73 | 73 / 84 = 0.87 | **1** |
-| Backend | 277 | 277 / 84 = 3.30 | **4** |
+| Backend | 279 | 279 / 84 = 3.32 | **4** |
 | Database | 62 | 62 / 84 = 0.74 | **1** (can overlap with Backend) |
 | Frontend / Design | 114 | 114 / 84 = 1.36 | **2** (1 designer-leaning + 1 dev-leaning, or 2 devs + contracted design) |
 | QA | 48 | 48 / 84 = 0.57 | **1** |
-| **Team total** | **574** | **6.84** | **~7–8 people** for a 6-month MVP |
+| **Team total** | **576** | **6.86** | **~7–8 people** for a 6-month MVP |
 
 > Adjust the calendar days and focus factor to your actual schedule to recompute the FTE requirement.
 

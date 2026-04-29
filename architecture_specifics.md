@@ -146,13 +146,13 @@ All AI workloads run as **separate, independently deployable Container Apps**, e
 > **Streaming results back to the UI:** AI agents (in particular the Generation Agent) publish **chunked** results to the `ai.results` topic, each chunk tagged with the originating `correlation_id` and a monotonically increasing `sequence_number`. The **FastAPI module services** own the public-facing SSE endpoints (`GET /api/<module>/ai/generation/stream/{correlation_id}`); they bridge `ai.results` → SSE via the Redis Pub/Sub fan-out helper in `erp_core/streaming/sse.py`. AI agents themselves remain **internal-only and HTTP-free** — no agent serves browser traffic.
 
 #### 8.2 AI Agent Services
-| Service | Container | Responsibility |
-|---------|-----------|---------------|
-| **Ingestion Agent** | `acr/ai-ingestion` | Extracts raw text and metadata from uploaded files (PDF, DOCX, XLSX, images via OCR). Chunks content and stores embeddings in pgvector / Azure AI Search. |
-| **Analysis Agent** | `acr/ai-analysis` | Analyses structured or unstructured content: clause risk scoring, financial anomaly detection, campaign performance insights. Calls GPT-4o. |
-| **Generation Agent** | `acr/ai-generation` | Generates content: legal summaries, marketing copy, financial narratives, email drafts. Calls GPT-4o. |
-| **Classification Agent** | `acr/ai-classification` | Fast, cheap triage: categorises documents, routes tasks, detects intent. Uses **GPT-4o-mini** to minimise cost. |
-| **Search Agent** | `acr/ai-search` | Semantic search across all module data using vector similarity (pgvector or Azure AI Search). Returns ranked, cited results. |
+| Service | Container | Transport | Responsibility |
+|---------|-----------|-----------|----------------|
+| **Ingestion Agent** | `acr/ai-ingestion` | Async (Service Bus) | Extracts raw text and metadata from uploaded files (PDF, DOCX, XLSX, images via OCR). Chunks content and stores embeddings in pgvector / Azure AI Search. |
+| **Analysis Agent** | `acr/ai-analysis` | Async (Service Bus) | Analyses structured or unstructured content: clause risk scoring, financial anomaly detection, campaign performance insights. Calls GPT-4o. |
+| **Generation Agent** | `acr/ai-generation` | Async (Service Bus, **chunked** results to `ai.results`) | Generates content: legal summaries, marketing copy, financial narratives, email drafts. Calls GPT-4o. |
+| **Classification Agent** | `acr/ai-classification` | Async (Service Bus) | Fast, cheap triage: categorises documents, routes tasks, detects intent. Uses **GPT-4o-mini** to minimise cost. |
+| **Search Agent** | `acr/ai-search` | **Sync HTTP** (`POST /search`) | Semantic search across all module data using vector similarity (pgvector or Azure AI Search). Returns ranked, cited results. **Min replicas = 1** (interactive workload — no cold starts); called via `erp_core.clients.SearchClient`. |
 
 #### 8.3 LLM Provider
 - **Azure OpenAI Service** — all agent services call Azure OpenAI APIs, no local model inference.
@@ -181,13 +181,15 @@ All AI workloads run as **separate, independently deployable Container Apps**, e
 | `ai.analysis.requests` | Orchestrator | Analysis Agent |
 | `ai.generation.requests` | Orchestrator | Generation Agent |
 | `ai.classification.requests` | Orchestrator | Classification Agent |
-| `ai.search.requests` | FastAPI module services | Search Agent |
 | `ai.results` | All AI agents | Orchestrator (aggregates results) **and** FastAPI module services (SSE bridge — subscribers filter by `correlation_id`; messages carry chunked `AIResultChunk` payloads with `sequence_number` for streamed UI delivery) |
 | `module.events` | All FastAPI services | Cross-module subscribers |
+
+> **Note — AI Search is sync HTTP, not Service Bus.** Search is interactive and latency-sensitive; the Search Agent exposes `POST /search` directly and is invoked via `erp_core.clients.SearchClient` (with retry / timeout / circuit breaker). It runs at min-replicas = 1 to avoid cold-start latency. There is no `ai.search.requests` queue.
 
 ### 10. Caching & Load Balancing
 - **Cache:** Azure Cache for Redis (clustered mode)
   - Session storage, rate limiting, AI response caching to reduce Azure OpenAI costs.
+  - **Search query cache:** the AI Search Agent caches recent query → result-set responses with a short TTL (default 60 s) to absorb repeated identical searches (autocomplete, paging) without re-running vector similarity.
 - **Load Balancing:** Azure API Management + Azure Container Apps built-in ingress (no Nginx Ingress Controller needed)
 
 ### 11. Deployment — Azure Container Apps (ACA)
@@ -214,7 +216,7 @@ CPU and memory consumed per second, with native scale-to-zero.
 | **AI — Analysis Agent** | `acr/ai-analysis` | 0 | 5 | Internal only | GPT-4o powered analysis; scales to zero when queue empty |
 | **AI — Generation Agent** | `acr/ai-generation` | 0 | 5 | Internal only | GPT-4o powered content generation; **publishes streamed chunks to `ai.results`** (consumed by module APIs for SSE delivery — agent itself has no HTTP ingress); scales to zero when queue empty |
 | **AI — Classification Agent** | `acr/ai-classification` | 0 | 8 | Internal only | GPT-4o-mini triage/routing; cheapest agent, scales aggressively |
-| **AI — Search Agent** | `acr/ai-search` | 0 | 5 | Internal only | Vector + keyword search across all modules; scales to zero when idle |
+| **AI — Search Agent** | `acr/ai-search` | 1 | 5 | Internal (HTTP) | **Sync HTTP** `POST /search`; vector + keyword search across all modules; **min replicas = 1** to avoid cold-start on interactive search |
 | **Celery Worker** | `acr/celery-worker` | 0 | 8 | None (no ingress) | Background tasks; scales to zero when queue empty |
 
 #### Traffic Flow
@@ -274,7 +276,7 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | AI — Analysis Agent | Azure Service Bus queue depth (`ai.analysis.requests`) | 0 | 5 | ✅ Always |
 | AI — Generation Agent | Azure Service Bus queue depth (`ai.generation.requests`) | 0 | 5 | ✅ Always |
 | AI — Classification Agent | Azure Service Bus queue depth (`ai.classification.requests`) | 0 | 8 | ✅ Always |
-| AI — Search Agent | HTTP concurrent requests | 0 | 5 | ✅ Always |
+| AI — Search Agent | HTTP concurrent requests | 1 | 5 | ❌ (always min 1 — interactive workload) |
 | Celery Worker | Azure Service Bus queue depth (background task queue) | 0 | 8 | ✅ Always |
 
 > Default HTTP scale trigger: **10 concurrent requests per replica** before adding a new instance. Configurable per app.
