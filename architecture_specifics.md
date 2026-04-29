@@ -167,6 +167,9 @@ All AI workloads run as **separate, independently deployable Container Apps**, e
 - **Production:** Azure Service Bus (fully managed, queues + topics/subscriptions)
 - **Local Development:** RabbitMQ via Docker Compose
 - Used for: inter-module events, background AI tasks, audit log streaming, notifications.
+- **Reliability primitives (provided by `erp-core`):**
+  - **Dead-letter queues + idempotency:** every Service Bus subscriber automatically moves poison messages to DLQ after N retries; consumers track processed message IDs in Redis to handle at-least-once redelivery without double-processing.
+  - **Transactional outbox:** producers write events to an `outbox` table inside the same DB transaction as their domain write; a relay process drains the outbox to Service Bus. Prevents the "DB write succeeded but Service Bus message lost" inconsistency. **No FastAPI service may publish directly to Service Bus** — all publishes go through `erp_core.messaging.outbox`.
 
 **Dedicated AI queues:**
 
@@ -250,6 +253,7 @@ Azure Front Door (CDN + WAF + TLS termination)
 - **`erp-core` package** is baked into each backend container image at build time (`pip install`). It is not a running service.
 - **Environments:** `dev`, `staging`, and `prod` are separate Container Apps Environments, each in its own Azure Resource Group.
 - **Secrets** are never baked into images — injected at runtime via **Azure Key Vault** references in Container App configuration.
+- **IaC-first:** every Azure resource (ACA environments, ACR, PostgreSQL, Redis, Service Bus, Key Vault, APIM, Front Door, Entra ID app registrations, Blob Storage, Azure OpenAI, Monitor, Budget Alerts) is authored as a **Terraform** module in the `erp-infrastructure` repo and applied via `terraform apply`. **No click-ops in the Azure Portal.** Remote state lives in Azure Storage with state locking; staging and prod are provisioned by re-applying the same modules with environment-specific `tfvars`.
 
 #### Autoscaling Strategy
 Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No HPA, KEDA, or Cluster Autoscaler configuration needed — it is all declarative per container app.
@@ -331,15 +335,22 @@ push to main
 - Regular security audits, OWASP secure coding practices.
 - All secrets managed via **Azure Key Vault**.
 - Network isolation: services communicate within Azure VNet; no direct public DB access.
+- **Upload hygiene:** every uploaded file is scanned by **Azure Defender for Storage** (malware) and validated for size + magic-byte content type **before** any downstream processing (e.g. AI ingestion). Infected or invalid files are quarantined and rejected.
+- **AI safety (provided by `erp-core`):**
+  - **PII redaction (Microsoft Presidio):** all text is passed through `erp_core.ai.pii_redactor` before being sent to Azure OpenAI. Strips names, emails, phones, IBANs, EGN/Bulstat, etc. for both EN and BG. Compliance-mandatory.
+  - **Prompt-injection guardrails:** `erp_core.ai.prompt_guard` sanitises user-supplied input (strips system-prompt overrides), validates LLM output against the expected Pydantic schema, detects known jailbreak patterns, and enforces token caps.
+  - **AI red-teaming:** prompt-injection and PII-leak suites run weekly in CI against all AI agents.
 
 ### 16. Data Backup & Disaster Recovery
 - Azure Database for PostgreSQL automated backups (point-in-time restore, up to 35 days).
 - Geo-redundant backup storage for critical data.
 - Container Apps recovery via redeployment from ACR image tags — each environment's image SHAs are stored in Git, enabling full environment rebuild in minutes.
+- **Full environment rebuild:** because all Azure resources are defined in Terraform (`erp-infrastructure`), an entire environment (network, ACA, DB, APIM, etc.) can be rebuilt from scratch by running `terraform apply` against a fresh subscription. Combined with image-SHA pinning above, this gives a deterministic DR path.
 
 ### 17. Documentation
 - **API Docs:** Auto-generated via FastAPI's OpenAPI/Swagger UI.
 - **Inter-Service Contracts:** See [`documentation/api_contracts.md`](documentation/api_contracts.md) for full REST and async event contracts between all FastAPI services.
+- **Frontend ↔ Backend type bridge:** the `erp-contracts` Pydantic models are auto-converted to TypeScript and published as the npm package `@erp/contracts-ts` on every contracts release. All frontends import types from this package — hand-copying types is forbidden and CI-enforced.
 - **Architecture Docs:** C4 model diagrams (Context, Container, Component).
 - **ADRs:** Architecture Decision Records for all major decisions (stored in `/docs/adr`).
 - **Codebase:** Docstrings enforced via linting; README per service.
@@ -368,7 +379,7 @@ push to main
 | `erp-ai-classification` | Container App | AI Classification Agent |
 | `erp-ai-search` | Container App | AI Search Agent |
 | `erp-celery-worker` | Container App | Background task worker |
-| `erp-infrastructure` | IaC only | Bicep / Terraform for all Azure resources (ACA environments, ACR, PostgreSQL, Redis, etc.) |
+| `erp-infrastructure` | IaC only | **Terraform** modules for all Azure resources (ACA environments, ACR, PostgreSQL, Redis, Service Bus, Key Vault, APIM, Front Door, Entra ID, Blob Storage, Azure OpenAI, Monitor, Budget Alerts). Remote state in Azure Storage; CI gates: `terraform fmt`, `tflint`, `checkov`, `terraform plan` on PRs, manual-approval `terraform apply` per env. |
 
 #### Branch Strategy (per repo)
 - `main` — production-ready code; protected, requires PR + passing CI.

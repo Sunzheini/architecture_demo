@@ -16,31 +16,38 @@
 
 ## Phase 0 — Infrastructure & DevOps Setup
 > Area: **DevOps** | Repo: `erp-infrastructure`
+> **IaC-first:** every Azure resource below is authored as a **Terraform** module in `erp-infrastructure` and applied via `terraform apply`. **No click-ops in the Azure Portal.** Each "provision X" task = "author the Terraform module for X + apply it to the **dev** environment". Staging and prod are then provisioned by re-applying the same modules with environment-specific `tfvars` (see INFRA-21).
 
 | ID | Task | Deliverable | Depends On | Est. (days) |
 |----|------|-------------|------------|-------------|
-| INFRA-01 | Create Azure Resource Groups (dev / staging / prod) | Azure RG per environment | — | 1 |
-| INFRA-02 | Provision Azure Container Registry (ACR) | ACR instance with repositories | INFRA-01 | 1 |
-| INFRA-03 | Provision Azure Container Apps Environment (dev) | ACA Environment — dev | INFRA-02 | 2 |
-| INFRA-04 | Provision Azure Container Apps Environment (staging / prod) | ACA Environment — staging, prod | INFRA-03 | 2 |
-| INFRA-05 | Provision Azure Database for PostgreSQL (Flexible Server) | PostgreSQL instance, Multi-AZ (prod) | INFRA-01 | 3 |
-| INFRA-06 | Provision Azure Cache for Redis (clustered) | Redis instance | INFRA-01 | 1 |
-| INFRA-07 | Provision Azure Service Bus (queues + topics) | Service Bus namespace with all queues from architecture spec | INFRA-01 | 2 |
-| INFRA-08 | Provision Azure Key Vault (one per environment) | Key Vault instances | INFRA-01 | 1 |
-| INFRA-09 | Provision Azure API Management (APIM) | APIM instance, JWT validation policy, routing rules to FastAPI services | INFRA-01 | 4 |
-| INFRA-10 | Configure Azure Front Door (CDN + WAF + TLS) | Front Door profile routing `/api/*` to APIM and static assets to frontend apps | INFRA-09 | 2 |
-| INFRA-11 | Configure Azure Entra ID (app registration, scopes, roles, MFA / Conditional Access) | App registration; roles: `legal.reader`, `legal.editor`, `marketing.admin`, `accounting.editor`, etc. | INFRA-01 | 3 |
-| INFRA-12 | Provision Azure Blob Storage (file uploads) | Storage account + containers per module | INFRA-01 | 1 |
-| INFRA-13 | Provision Azure OpenAI Service (GPT-4o, GPT-4o-mini, text-embedding-3-large) | Azure OpenAI endpoints via private endpoint in VNet | INFRA-01 | 2 |
+| INFRA-00 | Bootstrap `erp-infrastructure` Terraform repo: remote state in Azure Storage (with state locking via blob lease), module layout (`modules/`, `envs/{dev,staging,prod}/`), provider pinning, naming convention, tagging policy | `erp-infrastructure/` repo skeleton; remote backend configured; `README.md` with conventions | — | 3 |
+| INFRA-01 | Author Terraform module for Azure Resource Groups + apply to all envs (dev / staging / prod) | `modules/resource-group/`; RGs created via Terraform | INFRA-00 | 1 |
+| INFRA-02 | Author Terraform module for Azure Container Registry (ACR) + apply to dev | `modules/acr/`; ACR instance with repositories | INFRA-01 | 1 |
+| INFRA-03 | Author Terraform module for Azure Container Apps Environment + apply to dev | `modules/aca-environment/`; ACA Environment — dev | INFRA-02 | 2 |
+| INFRA-04 | Extend ACA-environment module with staging / prod tfvars (config-only, same module) | Staging + prod ACA env definitions in `envs/{staging,prod}/` (apply happens in INFRA-21) | INFRA-03 | 2 |
+| INFRA-05 | Author Terraform module for Azure Database for PostgreSQL (Flexible Server) + apply to dev | `modules/postgresql/`; Multi-AZ enabled via tfvars in prod | INFRA-01 | 3 |
+| INFRA-06 | Author Terraform module for Azure Cache for Redis (clustered) + apply to dev | `modules/redis/`; Redis instance | INFRA-01 | 1 |
+| INFRA-07 | Author Terraform module for Azure Service Bus (queues + topics from architecture spec) + apply to dev | `modules/service-bus/`; namespace with all queues | INFRA-01 | 2 |
+| INFRA-08 | Author Terraform module for Azure Key Vault (one per environment) + apply to dev | `modules/key-vault/`; Key Vault instance | INFRA-01 | 1 |
+| INFRA-09 | Author Terraform module for Azure API Management + apply to dev (JWT validation policy, routing rules, VNet integration) | `modules/apim/`; APIM instance with policies as code | INFRA-01 | 4 |
+| INFRA-10 | Author Terraform module for Azure Front Door (CDN + WAF + TLS) + apply to dev | `modules/front-door/`; routing `/api/*` to APIM and static assets to frontend apps | INFRA-09 | 2 |
+| INFRA-11 | Author Terraform module for Azure Entra ID (app registration, scopes, roles, MFA / Conditional Access) + apply to dev | `modules/entra-id/`; roles: `legal.reader`, `legal.editor`, `marketing.admin`, `accounting.editor`, etc. | INFRA-01 | 3 |
+| INFRA-12 | Author Terraform module for Azure Blob Storage (file uploads) + apply to dev | `modules/blob-storage/`; storage account + containers per module | INFRA-01 | 1 |
+| INFRA-13 | Author Terraform module for Azure OpenAI Service (GPT-4o, GPT-4o-mini, text-embedding-3-large) + apply to dev | `modules/azure-openai/`; endpoints via private endpoint in VNet | INFRA-01 | 2 |
 | INFRA-14 | Setup GitHub Actions: base reusable workflow (build → push ACR → deploy ACA) | `.github/workflows/deploy-template.yml` in each repo | INFRA-02, INFRA-03 | 3 |
 | INFRA-15 | Configure GitHub Environments (dev / staging / prod) with protection rules | GitHub Environments with reviewer sign-off for prod | INFRA-14 | 1 |
-| INFRA-16 | Setup Azure Monitor + Log Analytics workspace | Log Analytics workspace, container log routing | INFRA-03 | 2 |
-| INFRA-17 | Setup Grafana dashboards (CPU, memory, replica count, latency) | Grafana dashboards via Azure Monitor data source | INFRA-16 | 3 |
-| INFRA-18 | Configure OpenTelemetry → Azure Application Insights (all FastAPI services) | Application Insights resource; OTEL exporter config in `erp-core` | INFRA-16 | 2 |
-| INFRA-19 | Setup Azure Budget Alerts (80% and 100% spend) | Budget alert rules | INFRA-01 | 1 |
+| INFRA-16 | Author Terraform module for Azure Monitor + Log Analytics workspace + apply to dev | `modules/monitoring/`; container log routing | INFRA-03 | 2 |
+| INFRA-17 | Setup Grafana dashboards (CPU, memory, replica count, latency) — provisioned via Terraform Grafana provider | `modules/grafana-dashboards/`; dashboards via Azure Monitor data source | INFRA-16 | 3 |
+| INFRA-18 | Configure OpenTelemetry → Azure Application Insights (all FastAPI services); App Insights resource via Terraform | Application Insights resource; OTEL exporter config in `erp-core` | INFRA-16 | 2 |
+| INFRA-19 | Author Terraform module for Azure Budget Alerts (80% and 100% spend) + apply to all envs | `modules/budget-alerts/`; alert rules per env | INFRA-01 | 1 |
 | INFRA-20 | Setup Docker Compose for local development (PostgreSQL, RabbitMQ, Redis) | `docker-compose.dev.yml` shared across repos | — | 2 |
-| INFRA-21 | Write Bicep / Terraform for all Azure resources (IaC) | `erp-infrastructure` repo with complete IaC | INFRA-01–INFRA-13 | 8 |
-| **Group total** | | | | **47** |
+| INFRA-21 | Apply the existing Terraform stack to **staging + prod** environments (config-only re-apply with env-specific tfvars; drift check on dev) | Staging + prod fully provisioned from IaC; `terraform plan` shows zero drift on dev | INFRA-01–INFRA-13, INFRA-16, INFRA-19 | 3 |
+| INFRA-22 | Add CI gates to `erp-infrastructure` repo: `terraform fmt`, `tflint`, `checkov` (security/policy), `terraform plan` on PRs, manual-approval `terraform apply` per env | `.github/workflows/iac.yml`; required status checks on `main` | INFRA-00 | 2 |
+| INFRA-23 | Document IaC contribution workflow + module conventions + environment promotion runbook | `erp-infrastructure/README.md`; `docs/runbooks/iac-promotion.md` | INFRA-21, INFRA-22 | 1 |
+| INFRA-24 | Provision **Pact Broker** as a self-hosted Container App (Postgres-backed) — required by CONT-07 contract tests | `modules/pact-broker/`; Pact Broker URL in Key Vault | INFRA-03, INFRA-05 | 2 |
+| INFRA-25 | Configure **GitHub Packages** auth: org-level federated identity for CI; PAT for local dev; documented `pip` and `npm` install setup; secret distributed to all service repos | `docs/runbooks/github-packages.md`; `GH_PACKAGES_TOKEN` secret in every repo | INFRA-15 | 2 |
+| INFRA-26 | Provision **Azure Defender for Storage** (malware scanning on Blob uploads) — backend for BE-L-11 virus scan | `modules/defender-storage/`; Defender enabled on file-upload storage account | INFRA-12 | 1 |
+| **Group total** | | | | **53** |
 
 ---
 
@@ -63,10 +70,14 @@
 | CORE-10 | Implement `erp_core/security.py` — JWT claim extraction helpers (user ID, roles, module access) from APIM-forwarded headers | `erp_core/security.py` | CORE-01 | 2 |
 | CORE-11 | Implement `erp_core/constants.py` — shared enums: `ModuleName`, `AuditAction`, `EventType` | `erp_core/constants.py` | CORE-01 | 1 |
 | CORE-12 | Write unit tests for all `erp-core` modules (≥90% coverage) | `tests/` in `erp-core` repo | CORE-02–CORE-11 | 5 |
-| CORE-13 | Publish `erp-core` **v1.0.0** to GitHub Packages (without Django client — unblocks Django + FastAPI scaffolding) | GitHub Packages private PyPI entry | CORE-12 | 1 |
+| CORE-13 | Publish `erp-core` **v1.0.0** to GitHub Packages (without Django client — unblocks Django + FastAPI scaffolding) | GitHub Packages private PyPI entry | CORE-12, INFRA-25 | 1 |
 | CORE-14 | Implement `erp_core/clients/django_client.py` — typed async client for the Django internal REST API (auto-generated from Django's OpenAPI schema using `openapi-python-client`); wraps `erp_core/http_client.py` with managed-identity auth, retries, and `BaseRepository` interface compliance | `erp_core/clients/django_client.py`; CI step that regenerates the client when the Django OpenAPI schema changes | CORE-08, DB-17 | 3 |
-| CORE-15 | Publish `erp-core` **v1.1.0** to GitHub Packages (includes Django client) — required by all FastAPI services | GitHub Packages release | CORE-14 | 1 |
-| **Group total** | | | | **33** |
+| CORE-15 | Publish `erp-core` **v1.1.0** to GitHub Packages (includes Django client, DLQ/idempotency, transactional outbox, PII redactor, prompt guard) — required by all FastAPI services and AI agents | GitHub Packages release | CORE-14, CORE-16, CORE-17, CORE-18, CORE-19 | 1 |
+| CORE-16 | Implement **DLQ + idempotency** in `erp_core/messaging`: Service Bus subscribers automatically move poison messages to DLQ after N retries; consumers track processed message IDs in Redis to handle at-least-once redelivery | `erp_core/messaging/dlq.py`, `erp_core/messaging/idempotency.py`; integration tests with Azure Service Bus emulator | CORE-07 | 4 |
+| CORE-17 | Implement **transactional outbox pattern** in `erp_core/messaging`: producers write events to an `outbox` table inside the same DB transaction as their domain write; a relay process drains the outbox to Service Bus with at-least-once delivery. Required by every BE-*-publishes-event task. | `erp_core/messaging/outbox.py`; outbox table migration shipped in Django (DB-XX); relay worker mode in `erp_core.messaging` | CORE-07, DB-16 | 5 |
+| CORE-18 | Implement **PII redaction layer** in `erp_core/ai/pii_redactor.py` using **Microsoft Presidio**: strips/masks PII (names, emails, phones, IBANs, EGN/Bulstat) from any text before it is sent to Azure OpenAI. All AI agents and the Generation/Analysis prompt-builders must call it. | `erp_core/ai/pii_redactor.py`; Presidio recognizer config for EN + BG; unit tests with sample legal/financial PII | CORE-01 | 4 |
+| CORE-19 | Implement **prompt-injection guardrails** in `erp_core/ai/prompt_guard.py`: input sanitization (strip system-prompt overrides), output validation against expected Pydantic schema, jailbreak-pattern detection, max-length and token caps | `erp_core/ai/prompt_guard.py`; jailbreak pattern library; unit tests | CORE-01 | 3 |
+| **Group total** | | | | **49** |
 
 ### `erp-contracts` Pydantic Package
 > Area: **Backend** | Repo: `erp-contracts`
@@ -79,9 +90,10 @@
 | CONT-04 | Define REST contracts — Accounting module DTOs | `erp_contracts/accounting/` | CONT-01 | 4 |
 | CONT-05 | Define AI agent I/O schemas (`IngestionRequest`, `AnalysisResult`, `GenerationRequest`, `ClassificationRequest`, `SearchRequest`, `SearchResult`) | `erp_contracts/ai/` | CONT-01 | 3 |
 | CONT-06 | Define async event schemas for Service Bus messages | `erp_contracts/events/` | CONT-01 | 2 |
-| CONT-07 | Setup Pact consumer-driven contract tests in CI | `.github/workflows/pact.yml`; Pact Broker config | CONT-02–CONT-06 | 3 |
-| CONT-08 | Publish `erp-contracts` v1.0.0 to GitHub Packages | GitHub Packages private PyPI entry | CONT-07 | 1 |
-| **Group total** | | | | **20** |
+| CONT-07 | Setup Pact consumer-driven contract tests in CI | `.github/workflows/pact.yml`; Pact Broker config | CONT-02–CONT-06, INFRA-24 | 3 |
+| CONT-08 | Publish `erp-contracts` v1.0.0 to GitHub Packages | GitHub Packages private PyPI entry | CONT-07, INFRA-25 | 1 |
+| CONT-09 | Generate **TypeScript types** from `erp-contracts` Pydantic models using `pydantic2ts` / `datamodel-codegen`; publish as npm package `@erp/contracts-ts` to GitHub Packages on every contracts release. CI fails if types are out of date. | `scripts/generate_ts.py`; `@erp/contracts-ts` npm package; CI job in `erp-contracts` | CONT-08 | 3 |
+| **Group total** | | | | **23** |
 
 ---
 
@@ -131,12 +143,14 @@
 | BE-L-03 | Implement Legal Case management endpoints (via Django internal API) | `routes/cases.py` | BE-L-01, DB-16 | 3 |
 | BE-L-04 | Implement Legal Deadline tracking endpoints (via Django internal API) | `routes/deadlines.py` | BE-L-01, DB-16 | 2 |
 | BE-L-05 | Implement Law Acts / Knowledge Base endpoints (via Django internal API) | `routes/law_acts.py` | BE-L-01, DB-16 | 2 |
-| BE-L-06 | Implement document upload → trigger `ai.ingestion.requests` Service Bus message | `routes/documents.py`; Service Bus publisher | BE-L-01, CORE-07, INFRA-07 | 3 |
+| BE-L-06 | Implement document upload → trigger `ai.ingestion.requests` Service Bus message (only after virus scan + validation pass) | `routes/documents.py`; Service Bus publisher | BE-L-01, CORE-07, INFRA-07, BE-L-11, BE-L-12 | 3 |
 | BE-L-07 | Implement AI Search integration (publish to `ai.search.requests`, consume results) | `routes/search.py` | BE-L-01, CORE-07 | 3 |
 | BE-L-08 | Implement audit logging for all write operations (via `erp-core` middleware) | Audit events in `core_audit_log` | BE-L-01, DB-06 | 2 |
 | BE-L-09 | Write unit + integration tests (pytest + httpx) | `tests/` (≥80% coverage) | BE-L-01–BE-L-08 | 5 |
 | BE-L-10 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | BE-L-01, INFRA-14 | 2 |
-| **Group total** | | | | **26** |
+| BE-L-11 | Implement **virus / malware scan** on every uploaded document via Azure Defender for Storage (blocking — file is quarantined and rejected if Defender flags it) before publishing to `ai.ingestion.requests` | `services/upload_scanner.py`; Defender event-grid subscription | BE-L-01, INFRA-26 | 2 |
+| BE-L-12 | Implement **upload validation**: max file-size limit (configurable per env), magic-byte content-type validation (reject executables disguised as PDFs/DOCX), filename sanitization | `services/upload_validator.py` | BE-L-01 | 1 |
+| **Group total** | | | | **29** |
 
 ### Marketing FastAPI Service
 > Area: **Backend** | Repo: `erp-marketing-api`
@@ -274,13 +288,22 @@
 
 ## Phase 4 — Frontend
 
+### Design (Wireframes + Figma) — must complete before any FE implementation
+> Area: **Frontend / Design**
+
+| ID | Task | Deliverable | Depends On | Est. (days) |
+|----|------|-------------|------------|-------------|
+| FE-DSGN-01 | Wireframes + hi-fi Figma designs for all module screens (Legal, Marketing, Accounting) — covers every page listed in FE-L-*, FE-M-*, FE-AC-* | Figma file(s) reviewed and signed off by product + module owners | — | 8 |
+| FE-DSGN-02 | Define **design tokens** in Figma (colors, spacing, typography, elevation) and export to JSON for `FE-SH-02` consumption | `design-tokens.json`; Figma Tokens plugin export | FE-DSGN-01 | 2 |
+| **Group total** | | | | **10** |
+
 ### Shell Frontend (Micro-Frontend Host)
 > Area: **Frontend** | Repo: `erp-shell-frontend`
 
 | ID | Task | Deliverable | Depends On | Est. (days) |
 |----|------|-------------|------------|-------------|
 | FE-SH-01 | Initialize Shell App (React.js + TypeScript + Webpack Module Federation) | `frontends/erp-shell/` with Module Federation host config (`singleton: true`) | — | 2 |
-| FE-SH-02 | Setup shared design system + component library (shared via Module Federation) | `src/design-system/` (buttons, forms, typography, colors) | FE-SH-01 | 5 |
+| FE-SH-02 | Setup shared design system + component library (shared via Module Federation) — built from `FE-DSGN-02` design tokens | `src/design-system/` (buttons, forms, typography, colors) | FE-SH-01, FE-DSGN-02 | 5 |
 | FE-SH-03 | Implement Azure Entra ID login flow (redirect to Entra ID; receive JWT; store in memory — not localStorage) | `src/auth/authService.ts`; MSAL.js integration | FE-SH-01, INFRA-11 | 3 |
 | FE-SH-04 | Implement JWT token sharing to module remotes via Module Federation shared state | `src/auth/store.ts`; shared auth context | FE-SH-03 | 2 |
 | FE-SH-05 | Implement global navigation + sidebar (module-aware, role-based visibility) | `src/components/Navigation.tsx` | FE-SH-02 | 3 |
@@ -299,7 +322,7 @@
 
 | ID | Task | Deliverable | Depends On | Est. (days) |
 |----|------|-------------|------------|-------------|
-| FE-L-01 | Initialize Legal remote app (React.js + TypeScript + Webpack Module Federation remote config) | `frontends/erp-legal/` | FE-SH-01 | 1 |
+| FE-L-01 | Initialize Legal remote app (React.js + TypeScript + Webpack Module Federation remote config) | `frontends/erp-legal/` | FE-SH-01, FE-DSGN-01 | 1 |
 | FE-L-02 | Implement Legal Dossier list + detail pages | `src/pages/Dossiers/` | FE-L-01, BE-L-02 | 4 |
 | FE-L-03 | Implement Legal Case management UI | `src/pages/Cases/` | FE-L-01, BE-L-03 | 4 |
 | FE-L-04 | Implement Legal Deadline calendar / tracker UI | `src/pages/Deadlines/` | FE-L-01, BE-L-04 | 3 |
@@ -313,7 +336,7 @@
 
 | ID | Task | Deliverable | Depends On | Est. (days) |
 |----|------|-------------|------------|-------------|
-| FE-M-01 | Initialize Marketing remote app | `frontends/erp-marketing/` | FE-SH-01 | 1 |
+| FE-M-01 | Initialize Marketing remote app | `frontends/erp-marketing/` | FE-SH-01, FE-DSGN-01 | 1 |
 | FE-M-02 | Implement Campaigns list + detail + creation UI | `src/pages/Campaigns/` | FE-M-01, BE-M-02 | 4 |
 | FE-M-03 | Implement Lead management UI + lead-to-client conversion workflow | `src/pages/Leads/`; `src/components/LeadConversion.tsx` | FE-M-01, BE-M-03 | 4 |
 | FE-M-04 | Implement Ticket / Support queue UI | `src/pages/Tickets/` | FE-M-01, BE-M-04 | 3 |
@@ -327,7 +350,7 @@
 
 | ID | Task | Deliverable | Depends On | Est. (days) |
 |----|------|-------------|------------|-------------|
-| FE-AC-01 | Initialize Accounting remote app | `frontends/erp-accounting/` | FE-SH-01 | 1 |
+| FE-AC-01 | Initialize Accounting remote app | `frontends/erp-accounting/` | FE-SH-01, FE-DSGN-01 | 1 |
 | FE-AC-02 | Implement Journal Entry list + creation UI (double-entry form) | `src/pages/JournalEntries/` | FE-AC-01, BE-A-03 | 5 |
 | FE-AC-03 | Implement Chart of Accounts management UI | `src/pages/Accounts/` | FE-AC-01, BE-A-02 | 3 |
 | FE-AC-04 | Implement Accounting Periods UI + period closure workflow | `src/pages/Periods/` | FE-AC-01, BE-A-05 | 3 |
@@ -357,7 +380,8 @@
 | QA-11 | Security scan: OWASP ZAP against all public endpoints | ZAP scan report; fix identified issues | All BE + FE | 3 |
 | QA-12 | Accessibility audit (WCAG 2.1 AA) on all frontend modules | Lighthouse / axe-core report; fix critical issues | All FE | 3 |
 | QA-13 | Responsive design testing (desktop, tablet, mobile) | Cross-device test report | All FE | 2 |
-| **Group total** | | | | **45** |
+| QA-14 | **AI red-teaming**: prompt-injection + PII-leak test suite run against all 5 agents weekly in CI; validates `CORE-18` (PII redactor) and `CORE-19` (prompt guard) stay effective as prompts evolve | `tests/ai_redteam/`; LangSmith evaluation suite; weekly scheduled GitHub Action | CORE-18, CORE-19, AI-01–AI-SRC-07 | 3 |
+| **Group total** | | | | **48** |
 
 ---
 
@@ -382,11 +406,11 @@
 
 | Phase / Group | Est. (person-days) |
 |---|---|
-| Phase 0 — Infrastructure & DevOps | 47 |
-| Phase 1a — `erp-core` package | 33 |
-| Phase 1a — `erp-contracts` package | 20 |
+| Phase 0 — Infrastructure & DevOps | 53 |
+| Phase 1a — `erp-core` package | 49 |
+| Phase 1a — `erp-contracts` package | 23 |
 | Phase 1b — Data Layer (Django) | 62 |
-| Phase 2 — Legal FastAPI | 26 |
+| Phase 2 — Legal FastAPI | 29 |
 | Phase 2 — Marketing FastAPI | 27 |
 | Phase 2 — Accounting FastAPI | 41 |
 | Phase 2 — Celery Worker | 7 |
@@ -396,24 +420,25 @@
 | Phase 3 — AI Generation Agent | 23 |
 | Phase 3 — AI Classification Agent | 10 |
 | Phase 3 — AI Search Agent | 16 |
+| Phase 4 — Design (Figma) | 10 |
 | Phase 4 — Shell Frontend | 35 |
 | Phase 4 — Legal Frontend | 22 |
 | Phase 4 — Marketing Frontend | 22 |
 | Phase 4 — Accounting Frontend | 25 |
-| Phase 5 — Integration, QA & Testing | 45 |
+| Phase 5 — Integration, QA & Testing | 48 |
 | Phase 6 — Production Readiness | 15 |
-| **Grand Total** | **521 person-days** |
+| **Grand Total** | **562 person-days** |
 
 ### Effort by Discipline
 
 | Discipline | Est. (person-days) | Groups |
 |---|---|---|
-| **DevOps** | 47 + 15 = **62** | Phase 0, Phase 6 |
-| **Backend (shared + services + AI)** | 33 + 20 + 26 + 27 + 41 + 7 + 12 + 18 + 15 + 23 + 10 + 16 = **248** | Phase 1a, Phase 2, Phase 3 |
+| **DevOps** | 53 + 15 = **68** | Phase 0, Phase 6 |
+| **Backend (shared + services + AI)** | 49 + 23 + 29 + 27 + 41 + 7 + 12 + 18 + 15 + 23 + 10 + 16 = **270** | Phase 1a, Phase 2, Phase 3 |
 | **Database (Django data layer)** | **62** | Phase 1b |
-| **Frontend** | 35 + 22 + 22 + 25 = **104** | Phase 4 |
-| **QA** | **45** | Phase 5 |
-| **Total** | **521** | |
+| **Frontend / Design** | 10 + 35 + 22 + 22 + 25 = **114** | Phase 4 |
+| **QA** | **48** | Phase 5 |
+| **Total** | **562** | |
 
 ### Headcount Formula
 
@@ -428,12 +453,12 @@ Required FTEs (per discipline) = Discipline person-days / (Project calendar days
 
 | Discipline | Days | FTEs needed | Round up |
 |---|---|---|---|
-| DevOps | 62 | 62 / 84 = 0.74 | **1** |
-| Backend | 248 | 248 / 84 = 2.95 | **3** |
+| DevOps | 68 | 68 / 84 = 0.81 | **1** |
+| Backend | 270 | 270 / 84 = 3.21 | **4** |
 | Database | 62 | 62 / 84 = 0.74 | **1** (can overlap with Backend) |
-| Frontend | 104 | 104 / 84 = 1.24 | **2** |
-| QA | 45 | 45 / 84 = 0.54 | **1** |
-| **Team total** | **521** | **6.21** | **~7 people** for a 6-month MVP |
+| Frontend / Design | 114 | 114 / 84 = 1.36 | **2** (1 designer-leaning + 1 dev-leaning, or 2 devs + contracted design) |
+| QA | 48 | 48 / 84 = 0.57 | **1** |
+| **Team total** | **562** | **6.69** | **~7–8 people** for a 6-month MVP |
 
 > Adjust the calendar days and focus factor to your actual schedule to recompute the FTE requirement.
 
