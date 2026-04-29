@@ -204,6 +204,27 @@ See ADR `0007-ai-orchestrator-scope.md` for the full rationale and AI-06 / AI-07
 | **Classification Agent** | `acr/ai-classification` | Async (Service Bus) | Fast, cheap triage: categorises documents, routes tasks, detects intent. Uses **GPT-4o-mini** to minimise cost. |
 | **Search Agent** | `acr/ai-search` | **Sync HTTP** (`POST /search`) | Semantic search across all module data using vector similarity (pgvector or Azure AI Search). Returns ranked, cited results. **Min replicas = 1** (interactive workload — no cold starts); called via `erp_core.clients.SearchClient`. |
 
+##### Search Agent — availability, isolation & graceful degradation
+
+The Search Agent is the only sync-HTTP AI service and the only one fronting all three modules at once. The architecture hardens it along three independent axes so a single bad replica, a noisy module, or a full Search outage never produces a platform-wide black-out.
+
+**1. In-region redundancy (no SPOF).** Prod runs **2 replicas** spread across availability zones (configured via AI-SRC-08 + verified by an AZ-spread CI assertion). A chaos test kills one replica during steady search load and asserts zero user-visible 5xx. Dev/staging run a single replica to control cost.
+
+**2. Caller-side isolation (no noisy neighbour).** `erp_core.clients.SearchClient` (CORE-21) enforces a **per-module token-bucket rate limit** (default 20 req/s, configurable per env). A burst from Marketing cannot starve Legal users on the same agent. Excess requests return the same `degraded=true` path as a circuit-breaker-open response.
+
+**3. Graceful degradation (no broken UX).** When `SearchClient` returns `degraded=true` (breaker open or rate-limited), each module API falls back to a **plain Postgres keyword search** (`ILIKE` + `tsvector`) via the Django internal API; the response carries `degraded: true` so the frontend shows *"Showing keyword results — semantic search temporarily unavailable."* Reference implementation in BE-L-14; Marketing/Accounting inherit the pattern.
+
+**Stated SLO (AI-SRC-05 acceptance criterion):**
+
+| Indicator | Target | Burn-rate alerts |
+|---|---|---|
+| Availability (monthly) | **99.5%** (≈ 3.6 h error budget) | Fast burn: 1 h burn > 14× → page; slow burn: 6 h burn > 6× → page |
+| Latency (p95) | **≤ 800 ms** over a 100 K-embedding corpus | Azure Monitor alert on threshold breach |
+| Latency (p99) | **≤ 1.5 s** | Azure Monitor alert on threshold breach |
+| Caller fail-fast | HTTP 503 within **5 s** if pgvector or Azure OpenAI is unreachable | — |
+
+**Sharding decision (deferred).** Per-module sharding (one Search Agent per module) is a viable scale-out path but triples the operational and cost overhead and would only buy isolation that two replicas + per-module rate limiting already give us at MVP scale. We deliberately defer it; the trigger to revisit is documented in ADR `0008-search-agent-sharding-deferral.md` (AI-SRC-09): prod sustains > 10 searches/s/module **or** any module's index exceeds 5 GB.
+
 #### 8.3 LLM Provider
 - **Azure OpenAI Service** — all agent services call Azure OpenAI APIs, no local model inference.
   - GPT-4o: Analysis, Generation agents.
@@ -266,7 +287,7 @@ CPU and memory consumed per second, with native scale-to-zero.
 | **AI — Analysis Agent** | `acr/ai-analysis` | 0 | 5 | Internal only | GPT-4o powered analysis; scales to zero when queue empty |
 | **AI — Generation Agent** | `acr/ai-generation` | 1 (prod) / 0 (dev, staging) | 5 | Internal only | GPT-4o powered content generation; **publishes streamed chunks to `ai.results`** (consumed by module APIs for SSE delivery — agent itself has no HTTP ingress); **prod stays warm (`min=1`) to keep the streaming first-chunk SLO**, dev/staging scale to zero |
 | **AI — Classification Agent** | `acr/ai-classification` | 0 | 8 | Internal only | GPT-4o-mini triage/routing; cheapest agent, scales aggressively |
-| **AI — Search Agent** | `acr/ai-search` | 1 | 5 | Internal (HTTP) | **Sync HTTP** `POST /search`; vector + keyword search across all modules; **min replicas = 1** to avoid cold-start on interactive search |
+| **AI — Search Agent** | `acr/ai-search` | 2 (prod) / 1 (dev, staging) | 5 | Internal (HTTP) | **Sync HTTP** `POST /search`; vector + keyword search across all modules; **prod runs 2 replicas spread across availability zones** for in-region redundancy (single-replica failure is invisible to users) |
 | **Celery Worker** | `acr/celery-worker` | 0 | 8 | None (no ingress) | Background tasks; scales to zero when queue empty |
 
 #### Traffic Flow
@@ -326,7 +347,7 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | AI — Analysis Agent | Azure Service Bus queue depth (`ai.analysis.requests`) | 0 | 5 | ✅ Always |
 | AI — Generation Agent | Azure Service Bus queue depth (`ai.generation.requests`) | 1 (prod) / 0 (dev, staging) | 5 | ❌ (prod — keeps streaming first-chunk SLO) / ✅ (dev, staging) |
 | AI — Classification Agent | Azure Service Bus queue depth (`ai.classification.requests`) | 0 | 8 | ✅ Always |
-| AI — Search Agent | HTTP concurrent requests | 1 | 5 | ❌ (always min 1 — interactive workload) |
+| AI — Search Agent | HTTP concurrent requests | 2 (prod) / 1 (dev, staging) | 5 | ❌ (always min ≥ 1 — interactive workload; prod min=2 for AZ redundancy) |
 | Celery Worker | Azure Service Bus queue depth (background task queue) | 0 | 8 | ✅ Always |
 
 > Default HTTP scale trigger: **10 concurrent requests per replica** before adding a new instance. Configurable per app.

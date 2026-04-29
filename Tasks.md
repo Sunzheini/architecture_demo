@@ -115,7 +115,7 @@ In addition to the project DoD above:
 | CORE-18 | Implement **PII redaction layer** in `erp_core/ai/pii_redactor.py` using **Microsoft Presidio**: strips/masks PII (names, emails, phones, IBANs, EGN/Bulstat) from any text before it is sent to Azure OpenAI. All AI agents and the Generation/Analysis prompt-builders must call it. | `erp_core/ai/pii_redactor.py`; Presidio recognizer config for EN + BG; unit tests with sample legal/financial PII | CORE-01 | 4 |
 | CORE-19 | Implement **prompt-injection guardrails** in `erp_core/ai/prompt_guard.py`: input sanitization (strip system-prompt overrides), output validation against expected Pydantic schema, jailbreak-pattern detection, max-length and token caps | `erp_core/ai/prompt_guard.py`; jailbreak pattern library; unit tests | CORE-01 | 3 |
 | CORE-20 | Implement **SSE fan-out helper** in `erp_core/streaming/sse.py`: per-`correlation_id` channels backed by **Redis Pub/Sub** so any replica of a module API can deliver chunks to the open SSE connection regardless of which replica subscribed to `ai.results` first. Includes **15 s heartbeat** (`: heartbeat\n\n` SSE comment to keep proxies and `EventSource` alive), explicit **`event: status`** frames carrying `{"phase": "warming_up" | "generating" | "completed" | "failed", "reason"?: str}` on every workflow-state transition, client-disconnect detection, and back-pressure. Used by all module APIs for streamed AI output. | `erp_core/streaming/sse.py`; Redis Pub/Sub channel naming convention; integration test with 2 replicas + 1 producer covering: heartbeat survives 60 s of silence; `phase` transitions arrive in order | CORE-01, INFRA-06 | 3 |
-| CORE-21 | Implement typed **`SearchClient`** in `erp_core/clients/search_client.py` — sync HTTP wrapper around the AI Search Agent's `POST /search` endpoint. Wraps `erp_core.http_client` with retry, timeout, **circuit breaker**, and `correlation_id` propagation; exposes `search(query, filters) -> SearchResult` typed against the contract in `erp-contracts`. | `erp_core/clients/search_client.py`; integration test against a stubbed Search Agent | CORE-08 | 2 |
+| CORE-21 | Implement typed **`SearchClient`** in `erp_core/clients/search_client.py` — sync HTTP wrapper around the AI Search Agent's `POST /search` endpoint. Wraps `erp_core.http_client` with retry, timeout, **circuit breaker**, **per-module token-bucket rate limit** (default 20 req/s, configurable per env), and `correlation_id` propagation; exposes `search(query, filters) -> SearchResult` typed against the contract in `erp-contracts`. `SearchResult` carries a `degraded: bool` flag set to `true` when the breaker is open or the rate limit is exceeded so callers can fall back gracefully (see BE-L-14). | `erp_core/clients/search_client.py`; integration test against a stubbed Search Agent covering: breaker-open → `degraded=true`; rate-limited → `degraded=true`; per-module isolation (Marketing burst doesn't affect Legal) | CORE-08 | 2 |
 | **Group total** | | | | **54** |
 
 ### `erp-contracts` Pydantic Package
@@ -191,7 +191,8 @@ In addition to the project DoD above:
 | BE-L-11 | Implement **virus / malware scan** on every uploaded document via Azure Defender for Storage (blocking — file is quarantined and rejected if Defender flags it) before publishing to `ai.ingestion.requests` | `services/upload_scanner.py`; Defender event-grid subscription | BE-L-01, INFRA-26 | 2 |
 | BE-L-12 | Implement **upload validation**: max file-size limit (configurable per env), magic-byte content-type validation (reject executables disguised as PDFs/DOCX), filename sanitization | `services/upload_validator.py` | BE-L-01 | 1 |
 | BE-L-13 | Implement **AI streaming SSE endpoint** `GET /api/legal/ai/generation/stream/{correlation_id}` (Content-Type `text/event-stream`): publishes the generation request to `ai.generation.requests` via the outbox, **immediately** emits `event: status {"phase":"warming_up"}` so the client never sees a blank screen, then holds the SSE connection open and pushes chunks delivered by `CORE-20`'s Redis Pub/Sub fan-out as the Generation Agent emits them (transitioning to `phase=generating` on the first chunk and `phase=completed` on terminal). **Hard ceiling 180 s**: if no terminal frame, emit `event: status {"phase":"failed","reason":"timeout"}` and close. Replaces the previously planned in-agent SSE endpoint. | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` (Service Bus → Redis Pub/Sub bridge) | BE-L-01, CORE-15, CORE-20, INFRA-07 | 2 |
-| **Group total** | | | | **31** |
+| BE-L-14 | Implement **search graceful-degradation fallback** (reference implementation; Marketing/Accounting inherit the pattern in their existing search routes): when `SearchClient` returns `degraded=true` (breaker open or rate-limited), fall back to a Django-internal-API keyword search using `ILIKE` + Postgres `tsvector` over the relevant Legal tables; response carries `degraded: true` so the frontend banner (FE-L-05) can show "Showing keyword results — semantic search temporarily unavailable." | `services/search_fallback.py`; new `/internal/v1/legal/search` endpoint in Django (DB-16 amend); contract test that asserts `SearchClient` outage never returns 5xx to the user | BE-L-07, CORE-21, DB-16 | 3 |
+| **Group total** | | | | **34** |
 
 ### Marketing FastAPI Service
 > Area: **Backend** | Repo: `erp-marketing-api`
@@ -329,7 +330,9 @@ In addition to the project DoD above:
 | AI-SRC-05 | Expose `POST /search` HTTP endpoint (FastAPI + Uvicorn) with `erp-core` middleware, structured logging, and standard `/health` + `/ready` endpoints. **Sync request/response** — search is interactive and latency-sensitive; Service Bus is intentionally not used for this agent. | `routes/search.py`; `main.py` (FastAPI app factory) | AI-SRC-01, CORE-15 | 2 |
 | AI-SRC-06 | Implement token usage tracking + budget enforcement (Redis-backed) | `services/token_service.py` | AI-SRC-01, INFRA-06 | 3 |
 | AI-SRC-07 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | AI-SRC-01, INFRA-14 | 1 |
-| **Group total** | | | | **16** |
+| AI-SRC-08 | Configure prod **`min replicas = 2`** for the Search Agent (dev/staging stay at `min=1`); verify ACA spreads replicas across availability zones (read `replica.zone` from container metadata; assert ≥ 2 distinct zones in prod). Add a **chaos test** that kills 1 replica during a steady search load and asserts zero user-visible 5xx. | Updated `terraform/aca/ai-search/`; `tests/chaos/test_replica_kill.py`; AZ-spread assertion in CI | AI-SRC-05, INFRA-03 | 2 |
+| AI-SRC-09 | Author ADR **`/docs/adr/0008-search-agent-sharding-deferral.md`** documenting the deliberate decision to keep one Search Agent for all 3 modules in MVP (vs per-module shards); revisit triggers: prod sustains > 10 searches/s/module **or** any module's index exceeds 5 GB | `/docs/adr/0008-search-agent-sharding-deferral.md` | AI-SRC-08 | 1 |
+| **Group total** | | | | **19** |
 
 ---
 
@@ -496,7 +499,7 @@ In addition to the project DoD above:
 
 | Task | Acceptance Criteria |
 |---|---|
-| **AI-SRC-05** HTTP `/search` endpoint | • Sync request/response — no Service Bus involvement.<br>• p95 latency ≤ **800 ms** for vector search over a 100 K-embedding corpus on the dev DB.<br>• Returns HTTP **503** within **5 s** if Azure OpenAI or pgvector is unreachable (fail-fast — circuit breaker on the caller side handles backoff).<br>• `correlation_id` header is propagated from request to response and into all downstream logs/traces.<br>• Min replicas = **1** (no cold starts); HTTP-driven autoscaling up to max = 5. |
+| **AI-SRC-05** HTTP `/search` endpoint | • Sync request/response — no Service Bus involvement.<br>• p95 latency ≤ **800 ms** for vector search over a 100 K-embedding corpus on the dev DB; **p99 ≤ 1.5 s**.<br>• **Availability SLO: 99.5% monthly** (≈ 3.6 h/month error budget). Azure Monitor burn-rate alerts: **fast burn** (1 h burn > 14×) and **slow burn** (6 h burn > 6×) page on-call.<br>• Returns HTTP **503** within **5 s** if Azure OpenAI or pgvector is unreachable (fail-fast — circuit breaker on the caller side handles backoff; module APIs fall back to keyword search per BE-L-14).<br>• `correlation_id` header is propagated from request to response and into all downstream logs/traces.<br>• Min replicas = **2** in prod (spread across AZs — verified by AI-SRC-08); HTTP-driven autoscaling up to max = 5. |
 
 ### Phase 5 — QA
 
@@ -522,7 +525,7 @@ In addition to the project DoD above:
 | Phase 1a — `erp-core` package | 54 |
 | Phase 1a — `erp-contracts` package | 23 |
 | Phase 1b — Data Layer (Django) | 63 |
-| Phase 2 — Legal FastAPI | 31 |
+| Phase 2 — Legal FastAPI | 34 |
 | Phase 2 — Marketing FastAPI | 29 |
 | Phase 2 — Accounting FastAPI | 43 |
 | Phase 2 — Celery Worker | 7 |
@@ -531,7 +534,7 @@ In addition to the project DoD above:
 | Phase 3 — AI Analysis Agent | 15 |
 | Phase 3 — AI Generation Agent | 25 |
 | Phase 3 — AI Classification Agent | 10 |
-| Phase 3 — AI Search Agent | 16 |
+| Phase 3 — AI Search Agent | 19 |
 | Phase 4 — Design (Figma) | 10 |
 | Phase 4 — Shell Frontend | 35 |
 | Phase 4 — Legal Frontend | 22 |
@@ -539,18 +542,18 @@ In addition to the project DoD above:
 | Phase 4 — Accounting Frontend | 25 |
 | Phase 5 — Integration, QA & Testing | 48 |
 | Phase 6 — Production Readiness | 22 |
-| **Grand Total** | **608 person-days** |
+| **Grand Total** | **614 person-days** |
 
 ### Effort by Discipline
 
 | Discipline | Est. (person-days) | Groups |
 |---|---|---|
 | **DevOps** | 74 + 22 = **96** | Phase 0, Phase 6 |
-| **Backend (shared + services + AI)** | 54 + 23 + 31 + 29 + 43 + 7 + 16 + 18 + 15 + 25 + 10 + 16 = **287** | Phase 1a, Phase 2, Phase 3 |
+| **Backend (shared + services + AI)** | 54 + 23 + 34 + 29 + 43 + 7 + 16 + 18 + 15 + 25 + 10 + 19 = **293** | Phase 1a, Phase 2, Phase 3 |
 | **Database (Django data layer)** | **63** | Phase 1b |
 | **Frontend / Design** | 10 + 35 + 22 + 22 + 25 = **114** | Phase 4 |
 | **QA** | **48** | Phase 5 |
-| **Total** | **608** | |
+| **Total** | **614** | |
 
 ### Headcount Formula
 
@@ -566,11 +569,11 @@ Required FTEs (per discipline) = Discipline person-days / (Project calendar days
 | Discipline | Days | FTEs needed | Round up |
 |---|---|---|---|
 | DevOps | 96 | 96 / 84 = 1.14 | **2** |
-| Backend | 287 | 287 / 84 = 3.42 | **4** |
+| Backend | 293 | 293 / 84 = 3.49 | **4** |
 | Database | 63 | 63 / 84 = 0.75 | **1** (can overlap with Backend) |
 | Frontend / Design | 114 | 114 / 84 = 1.36 | **2** (1 designer-leaning + 1 dev-leaning, or 2 devs + contracted design) |
 | QA | 48 | 48 / 84 = 0.57 | **1** |
-| **Team total** | **608** | **7.24** | **~8 people** for a 6-month MVP |
+| **Team total** | **614** | **7.31** | **~8 people** for a 6-month MVP |
 
 > Adjust the calendar days and focus factor to your actual schedule to recompute the FTE requirement.
 
