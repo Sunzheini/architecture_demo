@@ -145,6 +145,33 @@ All AI workloads run as **separate, independently deployable Container Apps**, e
 
 > **Streaming results back to the UI:** AI agents (in particular the Generation Agent) publish **chunked** results to the `ai.results` topic, each chunk tagged with the originating `correlation_id` and a monotonically increasing `sequence_number`. The **FastAPI module services** own the public-facing SSE endpoints (`GET /api/<module>/ai/generation/stream/{correlation_id}`); they bridge `ai.results` → SSE via the Redis Pub/Sub fan-out helper in `erp_core/streaming/sse.py`. AI agents themselves remain **internal-only and HTTP-free** — no agent serves browser traffic.
 
+##### Scope: when does the Orchestrator get involved?
+
+The Orchestrator is **not** in the path of every AI request. It only mediates **multi-agent workflows**. Single-agent flows go module → agent directly via Service Bus (or sync HTTP for Search) so we do not pay an extra hop or a cold-start tax for trivial work.
+
+| Flow | Path | Why |
+|---|---|---|
+| Document upload → embeddings | Module API → `ai.ingestion.requests` → Ingestion Agent | Single agent, no decision logic. |
+| Semantic search | Module API → `SearchClient` (sync HTTP) → Search Agent | Latency-sensitive; Service Bus would add 100s of ms. |
+| Streaming generation (single prompt) | Module API → `ai.generation.requests` → Generation Agent → `ai.results` (chunked) → SSE | One agent, one prompt; Orchestrator adds no value. |
+| **End-to-end document workflow** (ingest → classify → analyse → summarise) | Module API → Orchestrator → fan-out across agents → aggregate → `ai.results` | Multi-step + branching; needs supervised state. |
+| **Cross-agent analysis pipelines** (e.g. risk score then explain) | Module API → Orchestrator → Analysis → Generation → aggregate | Step ordering + result feeding between agents. |
+
+##### Workflow state — surviving scale-to-zero
+
+Because the Orchestrator's `min replicas = 0`, an in-flight workflow would lose all in-memory LangGraph state when the last replica exits. We persist state via the **LangGraph Postgres checkpointer** in the `core.ai_workflow_state` table (DB-26), keyed by `correlation_id`. Each workflow step commits its checkpoint **inside the same DB transaction as its outbox publish** (reusing the transactional outbox from §9 / CORE-17), so a workflow can never advance one step without recording it. When the Orchestrator scales 0 → 1 to handle the next message, it loads the latest checkpoint for that `correlation_id` and resumes from where it left off. Terminal states are pruned after 30 days; in-progress states are retained indefinitely.
+
+##### Failure semantics — what happens when a step fails?
+
+| Failure scope | Behaviour |
+|---|---|
+| **Per-step transient error** (network, 5xx from Azure OpenAI) | Standard Service Bus retry path: subscriber retries up to N times, then DLQs the message (CORE-16). Workflow state is unchanged; the next checkpoint is not written. |
+| **Per-step terminal error** (4xx, schema-validation failure, prompt-guard rejection) | Subscriber DLQs immediately (no retry); Orchestrator transitions the workflow to a **failed** terminal state. |
+| **Workflow-level failure** | Orchestrator publishes an `AIWorkflowFailed` event to `ai.results` carrying `correlation_id`, `failed_step`, and `error_class`. Module APIs surface this to the user via the existing SSE channel (BE-L-13 / BE-M-10 / BE-A-14). |
+| **Compensation** (e.g. delete embeddings written by Ingestion if Classification later rejects the doc) | **Not automatic in MVP.** Documented as a manual operator runbook (`docs/runbooks/ai-workflow-failure.md`); revisit post-MVP if real incidents justify the engineering cost. |
+
+See ADR `0007-ai-orchestrator-scope.md` for the full rationale and AI-06 / AI-07 / AI-08 in `Tasks.md` for implementation tasks.
+
 #### 8.2 AI Agent Services
 | Service | Container | Transport | Responsibility |
 |---------|-----------|-----------|----------------|

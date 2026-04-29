@@ -166,7 +166,8 @@ In addition to the project DoD above:
 | DB-23 | Implement GDPR compliance: PII tagging in models, soft-delete + anonymization helpers, region/data-residency configuration | `core/gdpr.py`; PII metadata on model fields; anonymize management command | DB-02–DB-05 | 3 |
 | DB-24 | Implement **service-to-service authentication** for the Django internal API (Azure Managed Identity tokens validated by Django middleware; only ACA Container Apps in the same VNet with the `internal-api-caller` role can call it) | `internal_api/auth.py` middleware; Entra ID app registration for the internal API resource; allowed-callers list per environment | DB-16, INFRA-08, INFRA-11 | 3 |
 | DB-25 | Implement **schema drift / contract test** in CI: every PR runs the FastAPI integration suite against a freshly-migrated Django container to detect breaking schema changes before merge | `.github/workflows/schema-contract.yml`; shared docker-compose for the test job | DB-16, DB-22 | 2 |
-| **Group total** | | | | **62** |
+| DB-26 | Add `core.ai_workflow_state` table for the **LangGraph Postgres checkpointer** (used by AI-06): columns for `correlation_id`, `thread_id`, `checkpoint_data` (JSONB), `created_at`, `updated_at`, `status`; index on `(correlation_id, updated_at)`; TTL job prunes terminal states older than 30 days, keeps in-progress indefinitely | Django model + migration in `core` schema; Alembic-equivalent rollback path tested | DB-02 | 1 |
+| **Group total** | | | | **63** |
 
 ---
 
@@ -251,11 +252,14 @@ In addition to the project DoD above:
 | ID | Task | Deliverable | Depends On | Est. (days) |
 |----|------|-------------|------------|-------------|
 | AI-01 | Initialize AI Orchestrator service (LangGraph Supervisor) | `services/ai-orchestrator/` skeleton; LangGraph dependency | CORE-13, CONT-08 | 2 |
-| AI-02 | Implement task routing logic — routes incoming `ai.*` requests to correct agent via Service Bus | `orchestrator/supervisor.py`; routing rules per `EventType` | AI-01, INFRA-07 | 4 |
+| AI-02 | Implement task routing logic — routes incoming `ai.*` requests to correct agent via Service Bus (routing-rules table + dispatch only; checkpointing → AI-06, failure semantics → AI-07) | `orchestrator/supervisor.py`; routing rules per `EventType` | AI-01, INFRA-07 | 2 |
 | AI-03 | Implement result aggregation — consumes `ai.results` topic, returns to requesting FastAPI service | `orchestrator/aggregator.py` | AI-02 | 3 |
 | AI-04 | Setup LangSmith tracing integration for orchestrator | LangSmith config in `erp_core/logging.py` (AI trace extensions) | AI-01 | 1 |
 | AI-05 | Write Dockerfile + GitHub Actions CI/CD pipeline (scale-to-zero in ACA) | `Dockerfile`, `.github/workflows/ci-cd.yml` | AI-01, INFRA-14 | 2 |
-| **Group total** | | | | **12** |
+| AI-06 | Wire **LangGraph Postgres checkpointer** into the Orchestrator (using `DB-26`'s `core.ai_workflow_state` table) so multi-step workflows survive scale-to-zero. Each step's checkpoint commits in the same DB transaction as its outbox publish (reuses CORE-17). Integration test: pause a workflow mid-flight, scale Orchestrator to 0, requeue → workflow resumes from the last committed step. | `orchestrator/checkpointer.py`; integration test under `tests/test_resume.py` | AI-02, DB-26, CORE-17 | 3 |
+| AI-07 | Define **workflow failure semantics**: terminal failure publishes `AIWorkflowFailed` event to `ai.results` with `correlation_id` / `failed_step` / `error_class`; module APIs (BE-L-13 / BE-M-10 / BE-A-14) surface it via SSE; add `AIWorkflowFailed` Pydantic model to `erp-contracts` (CONT-05/06). **No automatic compensation in MVP** — documented as a manual operator runbook in PROD-07. | `orchestrator/failure.py`; `erp_contracts/ai/AIWorkflowFailed`; `docs/runbooks/ai-workflow-failure.md` | AI-02, CONT-05, CONT-06, BE-L-13, BE-M-10, BE-A-14 | 2 |
+| AI-08 | Document **Orchestrator scope** in `architecture_specifics.md` §8.1: decision matrix (direct module→agent flows: Ingestion, Search vs orchestrated multi-agent flows: Analysis pipelines, end-to-end document workflows) + canonical sequence diagram (upload → ingest → classify → summary); ADR `0007-ai-orchestrator-scope.md` | Updated §8.1; `/docs/adr/0007-ai-orchestrator-scope.md` | AI-02 | 1 |
+| **Group total** | | | | **16** |
 
 ### AI Ingestion Agent
 > Area: **Backend** | Repo: `erp-ai-ingestion`
@@ -515,12 +519,12 @@ In addition to the project DoD above:
 | Phase 0 — Infrastructure & DevOps | 74 |
 | Phase 1a — `erp-core` package | 54 |
 | Phase 1a — `erp-contracts` package | 23 |
-| Phase 1b — Data Layer (Django) | 62 |
+| Phase 1b — Data Layer (Django) | 63 |
 | Phase 2 — Legal FastAPI | 31 |
 | Phase 2 — Marketing FastAPI | 29 |
 | Phase 2 — Accounting FastAPI | 43 |
 | Phase 2 — Celery Worker | 7 |
-| Phase 3 — AI Orchestrator | 12 |
+| Phase 3 — AI Orchestrator | 16 |
 | Phase 3 — AI Ingestion Agent | 18 |
 | Phase 3 — AI Analysis Agent | 15 |
 | Phase 3 — AI Generation Agent | 21 |
@@ -533,18 +537,18 @@ In addition to the project DoD above:
 | Phase 4 — Accounting Frontend | 25 |
 | Phase 5 — Integration, QA & Testing | 48 |
 | Phase 6 — Production Readiness | 22 |
-| **Grand Total** | **599 person-days** |
+| **Grand Total** | **604 person-days** |
 
 ### Effort by Discipline
 
 | Discipline | Est. (person-days) | Groups |
 |---|---|---|
 | **DevOps** | 74 + 22 = **96** | Phase 0, Phase 6 |
-| **Backend (shared + services + AI)** | 54 + 23 + 31 + 29 + 43 + 7 + 12 + 18 + 15 + 21 + 10 + 16 = **279** | Phase 1a, Phase 2, Phase 3 |
-| **Database (Django data layer)** | **62** | Phase 1b |
+| **Backend (shared + services + AI)** | 54 + 23 + 31 + 29 + 43 + 7 + 16 + 18 + 15 + 21 + 10 + 16 = **283** | Phase 1a, Phase 2, Phase 3 |
+| **Database (Django data layer)** | **63** | Phase 1b |
 | **Frontend / Design** | 10 + 35 + 22 + 22 + 25 = **114** | Phase 4 |
 | **QA** | **48** | Phase 5 |
-| **Total** | **599** | |
+| **Total** | **604** | |
 
 ### Headcount Formula
 
@@ -560,11 +564,11 @@ Required FTEs (per discipline) = Discipline person-days / (Project calendar days
 | Discipline | Days | FTEs needed | Round up |
 |---|---|---|---|
 | DevOps | 96 | 96 / 84 = 1.14 | **2** |
-| Backend | 279 | 279 / 84 = 3.32 | **4** |
-| Database | 62 | 62 / 84 = 0.74 | **1** (can overlap with Backend) |
+| Backend | 283 | 283 / 84 = 3.37 | **4** |
+| Database | 63 | 63 / 84 = 0.75 | **1** (can overlap with Backend) |
 | Frontend / Design | 114 | 114 / 84 = 1.36 | **2** (1 designer-leaning + 1 dev-leaning, or 2 devs + contracted design) |
 | QA | 48 | 48 / 84 = 0.57 | **1** |
-| **Team total** | **599** | **7.13** | **~8 people** for a 6-month MVP |
+| **Team total** | **604** | **7.19** | **~8 people** for a 6-month MVP |
 
 > Adjust the calendar days and focus factor to your actual schedule to recompute the FTE requirement.
 
