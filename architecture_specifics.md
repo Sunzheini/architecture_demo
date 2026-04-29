@@ -145,6 +145,29 @@ All AI workloads run as **separate, independently deployable Container Apps**, e
 
 > **Streaming results back to the UI:** AI agents (in particular the Generation Agent) publish **chunked** results to the `ai.results` topic, each chunk tagged with the originating `correlation_id` and a monotonically increasing `sequence_number`. The **FastAPI module services** own the public-facing SSE endpoints (`GET /api/<module>/ai/generation/stream/{correlation_id}`); they bridge `ai.results` → SSE via the Redis Pub/Sub fan-out helper in `erp_core/streaming/sse.py`. AI agents themselves remain **internal-only and HTTP-free** — no agent serves browser traffic.
 
+##### SSE streaming contract (warm-up, heartbeat, timeouts)
+
+The module API responds **immediately** when an SSE request lands — well before the Generation Agent has produced anything. This is essential because (a) the Generation Agent may be cold-starting (`min=1` in prod, but dev/staging start from 0), and (b) intermediate proxies kill silent connections. The contract enforced by `erp_core/streaming/sse.py` (CORE-20) and the BE-*-13 endpoints is:
+
+| Frame | When | Payload |
+|---|---|---|
+| `event: status` | Immediately on connect | `{"phase":"warming_up"}` — frontend renders "Preparing your response…" |
+| `: heartbeat` (SSE comment) | Every 15 s while waiting | none — keeps `EventSource`, APIM, and Front Door from closing the connection |
+| `event: status` | First chunk arrives | `{"phase":"generating"}` |
+| `event: chunk` | For every Generation Agent chunk | `{"sequence_number": n, "delta": "..."}` |
+| `event: status` | Terminal | `{"phase":"completed"}` or `{"phase":"failed","reason":"..."}` |
+
+**Timeout discipline (top-down):**
+
+| Layer | Setting | Why |
+|---|---|---|
+| Module API SSE handler | Hard ceiling **180 s**; emits `phase=failed,reason=timeout` then closes | Bounds runaway requests; predictable UX |
+| APIM streaming policy (INFRA-09) | Response timeout **120 s**; `X-Accel-Buffering: no` preserved | APIM defaults (30–60 s) would kill cold-start streams |
+| ACA ingress | `requestTimeout = 240 s` | Outermost cap; never the binding constraint |
+| Generation Agent (prod) | `min replicas = 1` | Eliminates cold start on the streaming path |
+
+**SLO enforced by AI-GEN-09:** first content chunk to user **p95 ≤ 5 s warm (prod)**, **p95 ≤ 20 s cold (dev/staging)**. Synthetic monitor exports to Application Insights.
+
 ##### Scope: when does the Orchestrator get involved?
 
 The Orchestrator is **not** in the path of every AI request. It only mediates **multi-agent workflows**. Single-agent flows go module → agent directly via Service Bus (or sync HTTP for Search) so we do not pay an extra hop or a cold-start tax for trivial work.
@@ -241,7 +264,7 @@ CPU and memory consumed per second, with native scale-to-zero.
 | **AI Orchestrator** | `acr/ai-orchestrator` | 0 | 3 | Internal only | LangGraph Supervisor; routes tasks to AI agents; scales to zero when idle |
 | **AI — Ingestion Agent** | `acr/ai-ingestion` | 0 | 5 | Internal only | File parsing, chunking, embedding; scales to zero when queue empty |
 | **AI — Analysis Agent** | `acr/ai-analysis` | 0 | 5 | Internal only | GPT-4o powered analysis; scales to zero when queue empty |
-| **AI — Generation Agent** | `acr/ai-generation` | 0 | 5 | Internal only | GPT-4o powered content generation; **publishes streamed chunks to `ai.results`** (consumed by module APIs for SSE delivery — agent itself has no HTTP ingress); scales to zero when queue empty |
+| **AI — Generation Agent** | `acr/ai-generation` | 1 (prod) / 0 (dev, staging) | 5 | Internal only | GPT-4o powered content generation; **publishes streamed chunks to `ai.results`** (consumed by module APIs for SSE delivery — agent itself has no HTTP ingress); **prod stays warm (`min=1`) to keep the streaming first-chunk SLO**, dev/staging scale to zero |
 | **AI — Classification Agent** | `acr/ai-classification` | 0 | 8 | Internal only | GPT-4o-mini triage/routing; cheapest agent, scales aggressively |
 | **AI — Search Agent** | `acr/ai-search` | 1 | 5 | Internal (HTTP) | **Sync HTTP** `POST /search`; vector + keyword search across all modules; **min replicas = 1** to avoid cold-start on interactive search |
 | **Celery Worker** | `acr/celery-worker` | 0 | 8 | None (no ingress) | Background tasks; scales to zero when queue empty |
@@ -301,7 +324,7 @@ Azure Container Apps has **built-in autoscaling** with native scale-to-zero. No 
 | AI Orchestrator | Azure Service Bus queue depth (`ai.*` topics) | 0 | 3 | ✅ Always |
 | AI — Ingestion Agent | Azure Service Bus queue depth (`ai.ingestion.requests`) | 0 | 5 | ✅ Always |
 | AI — Analysis Agent | Azure Service Bus queue depth (`ai.analysis.requests`) | 0 | 5 | ✅ Always |
-| AI — Generation Agent | Azure Service Bus queue depth (`ai.generation.requests`) | 0 | 5 | ✅ Always |
+| AI — Generation Agent | Azure Service Bus queue depth (`ai.generation.requests`) | 1 (prod) / 0 (dev, staging) | 5 | ❌ (prod — keeps streaming first-chunk SLO) / ✅ (dev, staging) |
 | AI — Classification Agent | Azure Service Bus queue depth (`ai.classification.requests`) | 0 | 8 | ✅ Always |
 | AI — Search Agent | HTTP concurrent requests | 1 | 5 | ❌ (always min 1 — interactive workload) |
 | Celery Worker | Azure Service Bus queue depth (background task queue) | 0 | 8 | ✅ Always |

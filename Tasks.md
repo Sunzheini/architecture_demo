@@ -58,7 +58,7 @@ In addition to the project DoD above:
 | INFRA-06 | Author Terraform module for Azure Cache for Redis (clustered) + apply to dev | `modules/redis/`; Redis instance | INFRA-01 | 1 |
 | INFRA-07 | Author Terraform module for Azure Service Bus (queues + topics from architecture spec — note: `ai.search.requests` is **not** included; search is sync HTTP) + apply to dev | `modules/service-bus/`; namespace with all queues except search | INFRA-01 | 2 |
 | INFRA-08 | Author Terraform module for Azure Key Vault (one per environment) + apply to dev | `modules/key-vault/`; Key Vault instance | INFRA-01 | 1 |
-| INFRA-09 | Author Terraform module for Azure API Management + apply to dev (JWT validation policy, routing rules, VNet integration) | `modules/apim/`; APIM instance with policies as code | INFRA-01 | 4 |
+| INFRA-09 | Author Terraform module for Azure API Management + apply to dev (JWT validation policy, routing rules, VNet integration, **streaming policy: response timeout raised to 120 s + `X-Accel-Buffering: no` preserved end-to-end for `/api/<module>/ai/generation/stream/*` SSE routes**) | `modules/apim/`; APIM instance with policies as code | INFRA-01 | 4 |
 | INFRA-10 | Author Terraform module for Azure Front Door (CDN + WAF + TLS) + apply to dev | `modules/front-door/`; routing `/api/*` to APIM and static assets to frontend apps | INFRA-09 | 2 |
 | INFRA-11 | Author Terraform module for Azure Entra ID (app registration, scopes, roles, MFA / Conditional Access) + apply to dev | `modules/entra-id/`; roles: `legal.reader`, `legal.editor`, `marketing.admin`, `accounting.editor`, etc. | INFRA-01 | 3 |
 | INFRA-12 | Author Terraform module for Azure Blob Storage (file uploads) + apply to dev | `modules/blob-storage/`; storage account + containers per module | INFRA-01 | 1 |
@@ -114,7 +114,7 @@ In addition to the project DoD above:
 | CORE-17 | Implement **transactional outbox pattern** in `erp_core/messaging`: producers write events to an `outbox` table inside the same DB transaction as their domain write; a relay process drains the outbox to Service Bus with at-least-once delivery. Required by every BE-*-publishes-event task. | `erp_core/messaging/outbox.py`; outbox table migration shipped in Django (DB-XX); relay worker mode in `erp_core.messaging` | CORE-07, DB-16 | 5 |
 | CORE-18 | Implement **PII redaction layer** in `erp_core/ai/pii_redactor.py` using **Microsoft Presidio**: strips/masks PII (names, emails, phones, IBANs, EGN/Bulstat) from any text before it is sent to Azure OpenAI. All AI agents and the Generation/Analysis prompt-builders must call it. | `erp_core/ai/pii_redactor.py`; Presidio recognizer config for EN + BG; unit tests with sample legal/financial PII | CORE-01 | 4 |
 | CORE-19 | Implement **prompt-injection guardrails** in `erp_core/ai/prompt_guard.py`: input sanitization (strip system-prompt overrides), output validation against expected Pydantic schema, jailbreak-pattern detection, max-length and token caps | `erp_core/ai/prompt_guard.py`; jailbreak pattern library; unit tests | CORE-01 | 3 |
-| CORE-20 | Implement **SSE fan-out helper** in `erp_core/streaming/sse.py`: per-`correlation_id` channels backed by **Redis Pub/Sub** so any replica of a module API can deliver chunks to the open SSE connection regardless of which replica subscribed to `ai.results` first. Includes heartbeat, client-disconnect detection, and back-pressure. Used by all module APIs for streamed AI output. | `erp_core/streaming/sse.py`; Redis Pub/Sub channel naming convention; integration test with 2 replicas + 1 producer | CORE-01, INFRA-06 | 3 |
+| CORE-20 | Implement **SSE fan-out helper** in `erp_core/streaming/sse.py`: per-`correlation_id` channels backed by **Redis Pub/Sub** so any replica of a module API can deliver chunks to the open SSE connection regardless of which replica subscribed to `ai.results` first. Includes **15 s heartbeat** (`: heartbeat\n\n` SSE comment to keep proxies and `EventSource` alive), explicit **`event: status`** frames carrying `{"phase": "warming_up" | "generating" | "completed" | "failed", "reason"?: str}` on every workflow-state transition, client-disconnect detection, and back-pressure. Used by all module APIs for streamed AI output. | `erp_core/streaming/sse.py`; Redis Pub/Sub channel naming convention; integration test with 2 replicas + 1 producer covering: heartbeat survives 60 s of silence; `phase` transitions arrive in order | CORE-01, INFRA-06 | 3 |
 | CORE-21 | Implement typed **`SearchClient`** in `erp_core/clients/search_client.py` — sync HTTP wrapper around the AI Search Agent's `POST /search` endpoint. Wraps `erp_core.http_client` with retry, timeout, **circuit breaker**, and `correlation_id` propagation; exposes `search(query, filters) -> SearchResult` typed against the contract in `erp-contracts`. | `erp_core/clients/search_client.py`; integration test against a stubbed Search Agent | CORE-08 | 2 |
 | **Group total** | | | | **54** |
 
@@ -190,7 +190,7 @@ In addition to the project DoD above:
 | BE-L-10 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | BE-L-01, INFRA-14 | 2 |
 | BE-L-11 | Implement **virus / malware scan** on every uploaded document via Azure Defender for Storage (blocking — file is quarantined and rejected if Defender flags it) before publishing to `ai.ingestion.requests` | `services/upload_scanner.py`; Defender event-grid subscription | BE-L-01, INFRA-26 | 2 |
 | BE-L-12 | Implement **upload validation**: max file-size limit (configurable per env), magic-byte content-type validation (reject executables disguised as PDFs/DOCX), filename sanitization | `services/upload_validator.py` | BE-L-01 | 1 |
-| BE-L-13 | Implement **AI streaming SSE endpoint** `GET /api/legal/ai/generation/stream/{correlation_id}` (Content-Type `text/event-stream`): publishes the generation request to `ai.generation.requests` via the outbox, then holds the SSE connection open and pushes chunks delivered by `CORE-20`'s Redis Pub/Sub fan-out as the Generation Agent emits them. Replaces the previously planned in-agent SSE endpoint. | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` (Service Bus → Redis Pub/Sub bridge) | BE-L-01, CORE-15, CORE-20, INFRA-07 | 2 |
+| BE-L-13 | Implement **AI streaming SSE endpoint** `GET /api/legal/ai/generation/stream/{correlation_id}` (Content-Type `text/event-stream`): publishes the generation request to `ai.generation.requests` via the outbox, **immediately** emits `event: status {"phase":"warming_up"}` so the client never sees a blank screen, then holds the SSE connection open and pushes chunks delivered by `CORE-20`'s Redis Pub/Sub fan-out as the Generation Agent emits them (transitioning to `phase=generating` on the first chunk and `phase=completed` on terminal). **Hard ceiling 180 s**: if no terminal frame, emit `event: status {"phase":"failed","reason":"timeout"}` and close. Replaces the previously planned in-agent SSE endpoint. | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` (Service Bus → Redis Pub/Sub bridge) | BE-L-01, CORE-15, CORE-20, INFRA-07 | 2 |
 | **Group total** | | | | **31** |
 
 ### Marketing FastAPI Service
@@ -207,7 +207,7 @@ In addition to the project DoD above:
 | BE-M-07 | Implement ETL data import (bulk lead/campaign import) | `services/etl_service.py` | BE-M-01 | 4 |
 | BE-M-08 | Write unit + integration tests | `tests/` (≥80% coverage) | BE-M-01–BE-M-07 | 5 |
 | BE-M-09 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | BE-M-01, INFRA-14 | 2 |
-| BE-M-10 | Implement **AI streaming SSE endpoint** `GET /api/marketing/ai/generation/stream/{correlation_id}` — same pattern as BE-L-13 (publishes to `ai.generation.requests` via outbox; bridges `ai.results` to SSE via CORE-20) | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` | BE-M-01, CORE-15, CORE-20, INFRA-07 | 2 |
+| BE-M-10 | Implement **AI streaming SSE endpoint** `GET /api/marketing/ai/generation/stream/{correlation_id}` — same pattern as BE-L-13 (immediate `phase=warming_up`, bridge `ai.results` to SSE via CORE-20, hard 180 s ceiling with `phase=failed` on timeout) | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` | BE-M-01, CORE-15, CORE-20, INFRA-07 | 2 |
 | **Group total** | | | | **29** |
 
 ### Accounting FastAPI Service
@@ -228,7 +228,7 @@ In addition to the project DoD above:
 | BE-A-11 | Trigger AI generation for financial narratives → `ai.generation.requests` | Service Bus publisher in `services/narrative_service.py` | BE-A-01, CORE-07 | 3 |
 | BE-A-12 | Write unit + integration tests | `tests/` (≥80% coverage) | BE-A-01–BE-A-11 | 5 |
 | BE-A-13 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | BE-A-01, INFRA-14 | 2 |
-| BE-A-14 | Implement **AI streaming SSE endpoint** `GET /api/accounting/ai/generation/stream/{correlation_id}` — same pattern as BE-L-13 (publishes to `ai.generation.requests` via outbox; bridges `ai.results` to SSE via CORE-20) | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` | BE-A-01, CORE-15, CORE-20, INFRA-07 | 2 |
+| BE-A-14 | Implement **AI streaming SSE endpoint** `GET /api/accounting/ai/generation/stream/{correlation_id}` — same pattern as BE-L-13 (immediate `phase=warming_up`, bridge `ai.results` to SSE via CORE-20, hard 180 s ceiling with `phase=failed` on timeout) | `routes/ai_stream.py`; `consumers/ai_results_subscriber.py` | BE-A-01, CORE-15, CORE-20, INFRA-07 | 2 |
 | **Group total** | | | | **43** |
 
 ### Celery Background Worker
@@ -299,9 +299,11 @@ In addition to the project DoD above:
 | AI-GEN-04 | Implement financial narrative generation (GPT-4o) | `generators/financial_narrative.py` | AI-GEN-01, INFRA-13 | 3 |
 | AI-GEN-05 | Implement email draft generation (GPT-4o) | `generators/email_draft.py` | AI-GEN-01, INFRA-13 | 3 |
 | AI-GEN-06 | Create and manage prompt templates (per persona / use case) | `data/prompts/` (≥10 prompt templates covering all modules) | AI-GEN-01 | 4 |
-| AI-GEN-07 | Subscribe to `ai.generation.requests`; publish **streamed chunks** to `ai.results` topic with `correlation_id` and monotonically increasing `sequence_number` (consumed by module APIs' SSE fan-out via CORE-20) | `consumers/generation_consumer.py`; chunked `AIResultChunk` Pydantic schema in `erp-contracts` | AI-GEN-01, CORE-07 | 3 |
+| AI-GEN-07 | Subscribe to `ai.generation.requests`; publish **streamed chunks** to `ai.results` topic with `correlation_id` and monotonically increasing `sequence_number` (consumed by module APIs' SSE fan-out via CORE-20). First chunk sets `phase=generating`; terminal chunk sets `phase=completed` (or `failed` with `reason`). | `consumers/generation_consumer.py`; chunked `AIResultChunk` Pydantic schema in `erp-contracts` | AI-GEN-01, CORE-07 | 3 |
 | AI-GEN-08 | Write Dockerfile + GitHub Actions CI/CD pipeline | `Dockerfile`, `.github/workflows/ci-cd.yml` | AI-GEN-01, INFRA-14 | 1 |
-| **Group total** | | | | **21** |
+| AI-GEN-09 | Configure ACA scale rules: **prod `min replicas = 1`** for the Generation Agent (cost ≈ $0.50/day, eliminates cold-start on the streaming path); dev/staging keep `min = 0`. Add a synthetic monitor that asserts the **first-content-chunk SLO**: p95 ≤ **20 s** on cold start (dev/staging), p95 ≤ **5 s** when warm (prod). Wired into Application Insights. | Updated `terraform/aca/ai-generation/`; `tests/synthetic/first_chunk_slo.py`; alert rule | AI-GEN-07, INFRA-16 | 2 |
+| AI-GEN-10 | Frontend SSE warm-up UX (reference implementation in `erp-legal-frontend`, mirrored in marketing/accounting via FE-M-* / FE-AC-* SSE pages): consume the `event: status` frames from CORE-20 and render "Preparing your response…" while `phase=warming_up`; stream content while `phase=generating`; surface `phase=failed` (with `reason`) into the global Notification Center | `src/components/AIStreamPanel.tsx` in `erp-legal-frontend`; copied/imported by FE-M-06 + FE-AC-05 streaming pages | CORE-20, FE-L-05, FE-SH-09 | 2 |
+| **Group total** | | | | **25** |
 
 ### AI Classification Agent
 > Area: **Backend** | Repo: `erp-ai-classification`
@@ -527,7 +529,7 @@ In addition to the project DoD above:
 | Phase 3 — AI Orchestrator | 16 |
 | Phase 3 — AI Ingestion Agent | 18 |
 | Phase 3 — AI Analysis Agent | 15 |
-| Phase 3 — AI Generation Agent | 21 |
+| Phase 3 — AI Generation Agent | 25 |
 | Phase 3 — AI Classification Agent | 10 |
 | Phase 3 — AI Search Agent | 16 |
 | Phase 4 — Design (Figma) | 10 |
@@ -537,18 +539,18 @@ In addition to the project DoD above:
 | Phase 4 — Accounting Frontend | 25 |
 | Phase 5 — Integration, QA & Testing | 48 |
 | Phase 6 — Production Readiness | 22 |
-| **Grand Total** | **604 person-days** |
+| **Grand Total** | **608 person-days** |
 
 ### Effort by Discipline
 
 | Discipline | Est. (person-days) | Groups |
 |---|---|---|
 | **DevOps** | 74 + 22 = **96** | Phase 0, Phase 6 |
-| **Backend (shared + services + AI)** | 54 + 23 + 31 + 29 + 43 + 7 + 16 + 18 + 15 + 21 + 10 + 16 = **283** | Phase 1a, Phase 2, Phase 3 |
+| **Backend (shared + services + AI)** | 54 + 23 + 31 + 29 + 43 + 7 + 16 + 18 + 15 + 25 + 10 + 16 = **287** | Phase 1a, Phase 2, Phase 3 |
 | **Database (Django data layer)** | **63** | Phase 1b |
 | **Frontend / Design** | 10 + 35 + 22 + 22 + 25 = **114** | Phase 4 |
 | **QA** | **48** | Phase 5 |
-| **Total** | **604** | |
+| **Total** | **608** | |
 
 ### Headcount Formula
 
@@ -564,11 +566,11 @@ Required FTEs (per discipline) = Discipline person-days / (Project calendar days
 | Discipline | Days | FTEs needed | Round up |
 |---|---|---|---|
 | DevOps | 96 | 96 / 84 = 1.14 | **2** |
-| Backend | 283 | 283 / 84 = 3.37 | **4** |
+| Backend | 287 | 287 / 84 = 3.42 | **4** |
 | Database | 63 | 63 / 84 = 0.75 | **1** (can overlap with Backend) |
 | Frontend / Design | 114 | 114 / 84 = 1.36 | **2** (1 designer-leaning + 1 dev-leaning, or 2 devs + contracted design) |
 | QA | 48 | 48 / 84 = 0.57 | **1** |
-| **Team total** | **604** | **7.19** | **~8 people** for a 6-month MVP |
+| **Team total** | **608** | **7.24** | **~8 people** for a 6-month MVP |
 
 > Adjust the calendar days and focus factor to your actual schedule to recompute the FTE requirement.
 
