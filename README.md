@@ -18,5 +18,3 @@ it_dev@cccinfobg.onmicrosoft.com
   - Require conversation resolution before merging
   - Block force pushes
 - workflows
-
-
